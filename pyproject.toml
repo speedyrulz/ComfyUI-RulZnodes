@@ -3,6 +3,7 @@ name = "comfyui-rulznodes"
 description = "RulZ nodes for ComfyUI: Load Image with HEIC/HEIF support and a filename output, a resumable one-image-per-run batch loader, Mask Intelligent Crop, an advanced Resize Image with megapixel and input-size targets, and a per-workflow Disable Comfy Compiler model patch."
 version = "1.2.0"
 license = { file = "LICENSE" }
+classifiers = ["License :: OSI Approved :: GNU General Public License v3 (GPLv3)"]
 dependencies = ["pillow-heif"]
 
 [project.urls]

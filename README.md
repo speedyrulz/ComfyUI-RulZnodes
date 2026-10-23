@@ -143,4 +143,5 @@ RulZ Resize Image Advanced is based on the Resize Image v2 node and pad helpers 
 
 ## License
 
-[MIT](LICENSE)
+[GPL-3.0](LICENSE). RulZ Resize Image Advanced is derived from GPL-3.0 code in ComfyUI-KJNodes, so the
+pack as a whole is released under the same license.
