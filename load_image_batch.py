@@ -115,4 +115,4 @@ class LoadImageBatchSimple:
 
 
 NODE_CLASS_MAPPINGS = {"LoadImageBatchSimple": LoadImageBatchSimple}
-NODE_DISPLAY_NAME_MAPPINGS = {"LoadImageBatchSimple": "Load Image Batch (Simple)"}
+NODE_DISPLAY_NAME_MAPPINGS = {"LoadImageBatchSimple": "RulZ Simple Load Image Batch"}

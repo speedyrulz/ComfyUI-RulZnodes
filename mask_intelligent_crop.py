@@ -290,5 +290,5 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "MaskIntelligentCrop": "Mask Intelligent Crop",
+    "MaskIntelligentCrop": "RulZ Mask Intelligent Crop",
 }

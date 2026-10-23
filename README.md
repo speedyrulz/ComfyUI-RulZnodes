@@ -9,17 +9,19 @@
 
 <p align="center">
   Nodes for ComfyUI: load HEIC photos with their filename, step through a folder one image per run,
-  crop to a mask with sensible padding, and turn off the Comfy compiler per workflow.
+  crop to a mask with sensible padding, resize with megapixel and input-size targets, and turn off the
+  Comfy compiler per workflow.
 </p>
 
 ## Nodes
 
 | Node | What it does |
 |---|---|
-| [**Load Image (with filename, HEIC)**](#load-image-with-filename-heic) | `LoadImage` replacement that also loads `.heic` / `.heif` and outputs the filename. |
-| [**Load Image Batch (Simple)**](#load-image-batch-simple) | Walks through every image in a folder, one image per queued run, and resumes where it stopped. |
-| [**Mask Intelligent Crop**](#mask-intelligent-crop) | Crops an image and/or mask to the mask's bounding box plus padding, with an aspect limit and divisible-by snapping. |
-| [**Disable Comfy Compiler**](#disable-comfy-compiler) | Per-workflow replacement for the `--disable-comfy-compiler` launch flag. |
+| [**RulZ Load Image (HEIC)**](#rulz-load-image-heic) | `LoadImage` replacement that also loads `.heic` / `.heif` and outputs the filename. |
+| [**RulZ Simple Load Image Batch**](#rulz-simple-load-image-batch) | Walks through every image in a folder, one image per queued run, and resumes where it stopped. |
+| [**RulZ Mask Intelligent Crop**](#rulz-mask-intelligent-crop) | Crops an image and/or mask to the mask's bounding box plus padding, with an aspect limit and divisible-by snapping. |
+| [**RulZ Resize Image Advanced**](#rulz-resize-image-advanced) | KJNodes-style Resize Image v2 with input-size passthrough, upscale-by and total-megapixel targets, and the output resolution shown on the node. |
+| [**RulZ Disable Comfy Compiler**](#rulz-disable-comfy-compiler) | Per-workflow replacement for the `--disable-comfy-compiler` launch flag. |
 
 All nodes are in the **RulZnodes** category of the node menu.
 
@@ -37,12 +39,13 @@ Use ComfyUI's own Python for the `pip install`. Restart ComfyUI and hard-refresh
 handles the usual formats only.
 
 > **Coming from the standalone packs?** Remove `ComfyUI-image-load-filename-heic`, `load-image-batch-simple`,
-> `mask-intelligent-crop` and `ComfyUI-DisableComfyCompiler` from `custom_nodes`. The node IDs are unchanged, so existing workflows keep
+> `mask-intelligent-crop`, `resize-image-v2-advanced` and `ComfyUI-DisableComfyCompiler` from `custom_nodes`.
+> The node IDs are unchanged (only the display names gained a "RulZ" prefix), so existing workflows keep
 > working, but with both installed the same nodes are registered twice.
 
 ---
 
-## Load Image (with filename, HEIC)
+## RulZ Load Image (HEIC)
 
 `LoadImageWithFilenameHEIC`: a `LoadImage` replacement that also loads `.heic` / `.heif` files and outputs the filename.
 
@@ -54,7 +57,7 @@ handles the usual formats only.
   files as JPEG from ComfyUI's `/view` endpoint. The conversion happens in memory; no extra files are created.
 - EXIF rotation is applied, so phone photos come out upright.
 
-## Load Image Batch (Simple)
+## RulZ Simple Load Image Batch
 
 `LoadImageBatchSimple`: walks through every image in a directory, one image per queued run.
 
@@ -71,7 +74,7 @@ Progress is saved per directory in `batch_state.json` in the pack folder, so que
 covers all 10 images, even across a ComfyUI restart. Files added to or removed from the folder are picked up
 on the next run.
 
-## Mask Intelligent Crop
+## RulZ Mask Intelligent Crop
 
 `MaskIntelligentCrop`: crops an image and/or mask to the bounding box of the mask, then extends **every side**
 of that box by a percentage (default 10%). By default the percentage is measured against the **final crop**,
@@ -98,7 +101,29 @@ so the subject ends up inside a 10% border. The padded box is clamped to the ima
 - **empty mask**: inputs are returned at full size.
 - **batches**: the crop box is the union over the whole mask batch, so every frame is cropped to the same size.
 
-## Disable Comfy Compiler
+## RulZ Resize Image Advanced
+
+`ResizeImageV2Advanced`: a standalone clone of the KJNodes **Resize Image v2** node with extra sizing controls.
+No dependency on ComfyUI-KJNodes.
+
+| Setting | Description |
+|---|---|
+| `image_2` (optional) | A second image used **only for its width/height**. The output is always a resized `image_1`. |
+| `use_input_size` | `off` / `image_1` / `image_2`. Uses that image's width/height as the `width`/`height` settings. With `divisible_by` set, the output is the closest resolution to that image that is divisible. |
+| `upscale_mode` | `disabled` / `upscale_by` / `total_megapixels`. Applied to the target size (after `use_input_size`), before the `keep_proportion` logic runs. |
+| `upscale_by` | Float ≥ 0.01. Multiplies both edges of the target size. |
+| `total_megapixels` | Float ≥ 0.01. Rescales the target size (keeping its aspect ratio) to the nearest total pixel count. 1 MP = 1024×1024 px, same as ComfyUI's *ImageScaleToTotalPixels*. |
+| Output resolution | Shown on the node after execution (`W x H (MP) \| image_1 W x H \| image_2 W x H`). |
+| Defaults | `upscale_method = lanczos`, `keep_proportion = crop`, `divisible_by = 32`. |
+| Rounding | All computed sizes are rounded to the **nearest** multiple of `divisible_by` (KJ's original rounds down). |
+
+**Outputs:** `IMAGE`, `width`, `height`, `mask`.
+
+Everything else (stretch / resize / pad / pad_edge / pad_edge_pixel / crop / pillarbox_blur / total_pixels,
+crop position, pad colour, mask handling, GPU device option, NVIDIA RTX VSR method) matches the original.
+The `nvidia_rtx_vsr` method needs the `nvidia-vfx` library and an NVIDIA RTX GPU.
+
+## RulZ Disable Comfy Compiler
 
 `DisableComfyCompiler`: a per-workflow replacement for the `--disable-comfy-compiler` launch flag.
 
@@ -110,6 +135,11 @@ Start ComfyUI without `--disable-comfy-compiler` and place the node between your
 
 - Tested on ComfyUI 0.37.0 with Qwen Image 2.1.
 - Only the diffusion model is covered; text encoders and latent previews are not affected.
+
+## Credits
+
+RulZ Resize Image Advanced is based on the Resize Image v2 node and pad helpers from
+[ComfyUI-KJNodes](https://github.com/kijai/ComfyUI-KJNodes) by kijai.
 
 ## License
 

@@ -44,4 +44,4 @@ class DisableComfyCompiler:
 
 
 NODE_CLASS_MAPPINGS = {"DisableComfyCompiler": DisableComfyCompiler}
-NODE_DISPLAY_NAME_MAPPINGS = {"DisableComfyCompiler": "Disable Comfy Compiler"}
+NODE_DISPLAY_NAME_MAPPINGS = {"DisableComfyCompiler": "RulZ Disable Comfy Compiler"}

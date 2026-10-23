@@ -120,5 +120,5 @@ class LoadImageWithFilenameHEIC:
 
 NODE_CLASS_MAPPINGS = {"LoadImageWithFilenameHEIC": LoadImageWithFilenameHEIC}
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "LoadImageWithFilenameHEIC": "Load Image (with filename, HEIC)"
+    "LoadImageWithFilenameHEIC": "RulZ Load Image (HEIC)"
 }
