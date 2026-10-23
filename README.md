@@ -8,8 +8,8 @@
 <h1 align="center">ComfyUI-RulZnodes</h1>
 
 <p align="center">
-  Image nodes for ComfyUI: load HEIC photos with their filename, step through a folder one image per run,
-  and crop to a mask with sensible padding.
+  Nodes for ComfyUI: load HEIC photos with their filename, step through a folder one image per run,
+  crop to a mask with sensible padding, and turn off the Comfy compiler per workflow.
 </p>
 
 ## Nodes
@@ -19,8 +19,9 @@
 | [**Load Image (with filename, HEIC)**](#load-image-with-filename-heic) | `LoadImage` replacement that also loads `.heic` / `.heif` and outputs the filename. |
 | [**Load Image Batch (Simple)**](#load-image-batch-simple) | Walks through every image in a folder, one image per queued run, and resumes where it stopped. |
 | [**Mask Intelligent Crop**](#mask-intelligent-crop) | Crops an image and/or mask to the mask's bounding box plus padding, with an aspect limit and divisible-by snapping. |
+| [**Disable Comfy Compiler**](#disable-comfy-compiler) | Per-workflow replacement for the `--disable-comfy-compiler` launch flag. |
 
-All three are in the **RulZnodes** category of the node menu.
+All nodes are in the **RulZnodes** category of the node menu.
 
 ## Install
 
@@ -35,8 +36,8 @@ Use ComfyUI's own Python for the `pip install`. Restart ComfyUI and hard-refresh
 `pillow-heif` is only needed for HEIC/HEIF. Without it the other nodes work as normal and the HEIC loader
 handles the usual formats only.
 
-> **Coming from the standalone packs?** Remove `ComfyUI-image-load-filename-heic`, `load-image-batch-simple`
-> and `mask-intelligent-crop` from `custom_nodes`. The node IDs are unchanged, so existing workflows keep
+> **Coming from the standalone packs?** Remove `ComfyUI-image-load-filename-heic`, `load-image-batch-simple`,
+> `mask-intelligent-crop` and `ComfyUI-DisableComfyCompiler` from `custom_nodes`. The node IDs are unchanged, so existing workflows keep
 > working, but with both installed the same nodes are registered twice.
 
 ---
@@ -96,6 +97,19 @@ so the subject ends up inside a 10% border. The padded box is clamped to the ima
 - **image only**: nothing to crop by, so the image passes through unchanged with a blank (all zero) mask of the same size.
 - **empty mask**: inputs are returned at full size.
 - **batches**: the crop box is the union over the whole mask batch, so every frame is cropped to the same size.
+
+## Disable Comfy Compiler
+
+`DisableComfyCompiler`: a per-workflow replacement for the `--disable-comfy-compiler` launch flag.
+
+The node takes a `MODEL` and returns a clone that turns the Comfy model compiler (and its CUDA graph
+subfeature) off only while that model's diffusion forward pass runs. The flags are restored afterwards, so
+other workflows are unaffected. Set `disable` to off to pass the model through untouched.
+
+Start ComfyUI without `--disable-comfy-compiler` and place the node between your model loader and sampler.
+
+- Tested on ComfyUI 0.37.0 with Qwen Image 2.1.
+- Only the diffusion model is covered; text encoders and latent previews are not affected.
 
 ## License
 
