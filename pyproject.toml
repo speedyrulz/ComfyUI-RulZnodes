@@ -1,0 +1,13 @@
+[project]
+name = "comfyui-rulznodes"
+description = "RulZ nodes for ComfyUI: Load Image with HEIC/HEIF support and a filename output, a resumable one-image-per-run batch loader, and Mask Intelligent Crop."
+version = "1.0.0"
+license = { file = "LICENSE" }
+dependencies = ["pillow-heif"]
+
+[project.urls]
+Repository = "https://github.com/speedyrulz/ComfyUI-RulZnodes"
+
+[tool.comfy]
+DisplayName = "RulZnodes"
+Icon = "https://raw.githubusercontent.com/speedyrulz/ComfyUI-RulZnodes/main/assets/icon.png"

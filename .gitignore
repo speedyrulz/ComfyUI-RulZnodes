@@ -1,0 +1,4 @@
+__pycache__/
+*.pyc
+batch_state.json
+batch_state.json.tmp
