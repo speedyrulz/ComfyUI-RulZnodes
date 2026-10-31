@@ -8,13 +8,26 @@ const EDGE_WIDGETS = ["padding_top", "padding_bottom", "padding_left", "padding_
 // Widget order before padding_mode and the per-edge inputs existed.
 const LEGACY_WIDGETS = ["padding_percent", "padding_reference", "aspect_limit", "divisible_by", "mask_threshold"];
 
+// Newer frontends give widgets a `hidden` accessor. Mixing it with the legacy
+// type swap below leaves the widget stuck hidden, so use one or the other.
+function hasNativeHidden(widget) {
+    for (let o = widget; o; o = Object.getPrototypeOf(o)) {
+        if (Object.getOwnPropertyDescriptor(o, "hidden")?.set) return true;
+    }
+    return false;
+}
+
 function setWidgetVisible(widget, visible) {
     if (!widget) return;
+    if (hasNativeHidden(widget)) {
+        widget.hidden = !visible;
+        return;
+    }
+    // Older frontends: swap the type so the widget is not drawn and give it no height.
     if (widget._rulzOrigType === undefined) {
         widget._rulzOrigType = widget.type;
         widget._rulzOrigComputeSize = widget.computeSize;
     }
-    widget.hidden = !visible;
     widget.type = visible ? widget._rulzOrigType : "hidden";
     widget.computeSize = visible ? widget._rulzOrigComputeSize : () => [0, -4];
 }
