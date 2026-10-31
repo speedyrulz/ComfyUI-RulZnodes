@@ -27,6 +27,11 @@ All nodes are in the **RulZnodes** category of the node menu.
 
 ## Install
 
+**ComfyUI-Manager:** open **Custom Nodes Manager**, search for **RulZnodes** and install it. Or, with
+[comfy-cli](https://github.com/Comfy-Org/comfy-cli): `comfy node install comfyui-rulznodes`.
+
+**Manually:**
+
 ```
 cd ComfyUI/custom_nodes
 git clone https://github.com/speedyrulz/ComfyUI-RulZnodes
