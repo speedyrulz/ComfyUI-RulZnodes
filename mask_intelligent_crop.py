@@ -10,6 +10,9 @@ clamped to the image bounds.
       - mask only    : crop the mask, image output is None
       - image only   : nothing to crop by, image is passed through unchanged
                        and a blank (all zero) mask of the image size is output
+  * padding_mode      - uniform: padding_percent on every side
+                        per_edge: padding_top / _bottom / _left / _right each
+                        set one side
   * padding_percent   - how far each side extends beyond the masked area
   * padding_reference - what the percentage is measured against:
                           crop  - the final cropped image (default), so with 10%
@@ -143,29 +146,43 @@ def _limit_aspect(x0, x1, y0, y1, width, height, max_ratio, mx0, mx1, my0, my1):
 
 
 PADDING_REFERENCES = ["crop", "mask", "image"]
+PADDING_MODES = ["uniform", "per_edge"]
+
+# Largest combined share of an axis the two "crop"-referenced borders may take
+# (the formula diverges at 100%).
+_MAX_CROP_SHARE = 0.9
 
 
-def _padding(percent: float, reference: str, frame_size: int, mask_size: int) -> int:
-    """Pixels to add on each side of one axis, rounded to the nearest pixel."""
-    p = percent / 100.0
+def _padding(percent_lo: float, percent_hi: float, reference: str, frame_size: int, mask_size: int):
+    """
+    Pixels to add before (left/top) and after (right/bottom) the mask on one
+    axis, each rounded to the nearest pixel.
+    """
+    p_lo, p_hi = percent_lo / 100.0, percent_hi / 100.0
     if reference == "image":
-        pad = frame_size * p
+        pad_lo, pad_hi = frame_size * p_lo, frame_size * p_hi
     elif reference == "mask":
-        pad = mask_size * p
+        pad_lo, pad_hi = mask_size * p_lo, mask_size * p_hi
     else:
-        # "crop": each side is `percent` of the final crop size.
-        # pad = p * (mask + 2 * pad)  =>  pad = p * mask / (1 - 2p). Capped below
-        # 50% where the formula diverges.
-        p = min(p, 0.45)
-        pad = mask_size * p / (1.0 - 2.0 * p)
-    return int(math.floor(pad + 0.5))
+        # "crop": each side is its percentage of the final crop size.
+        # crop = mask + pad_lo + pad_hi with pad = p * crop
+        #   =>  crop = mask / (1 - p_lo - p_hi). The combined share is capped
+        # below 100%, scaling both sides down together, where it diverges.
+        total = p_lo + p_hi
+        if total > _MAX_CROP_SHARE:
+            p_lo, p_hi = _MAX_CROP_SHARE * (p_lo / total), _MAX_CROP_SHARE * (p_hi / total)
+        denom = 1.0 - (p_lo + p_hi)
+        pad_lo, pad_hi = mask_size * p_lo / denom, mask_size * p_hi / denom
+    return int(math.floor(pad_lo + 0.5)), int(math.floor(pad_hi + 0.5))
 
 
-def compute_crop_box(mask: torch.Tensor, padding_percent: float, divisible_by: int, threshold: float,
+def compute_crop_box(mask: torch.Tensor, padding_percent, divisible_by: int, threshold: float,
                      frame_height: int = None, frame_width: int = None,
                      padding_reference: str = "crop", max_aspect_ratio: float = None):
     """
     mask: [B, H, W] float tensor at its native resolution.
+    padding_percent: one percentage for every side, or a (top, bottom, left,
+    right) tuple of percentages.
     frame_height / frame_width: size of the frame being cropped (the image).
     Defaults to the mask size. The mask bounding box is scaled into frame
     coordinates before padding is applied, so a low-resolution mask never
@@ -196,13 +213,17 @@ def compute_crop_box(mask: torch.Tensor, padding_percent: float, divisible_by: i
         my0, my1 = int(math.floor(my0 * sy)), min(height, int(math.ceil(my1 * sy)))
         mx0, mx1 = int(math.floor(mx0 * sx)), min(width, int(math.ceil(mx1 * sx)))
 
-    pad_x = _padding(padding_percent, padding_reference, width, mx1 - mx0)
-    pad_y = _padding(padding_percent, padding_reference, height, my1 - my0)
+    if isinstance(padding_percent, (int, float)):
+        top = bottom = left = right = padding_percent
+    else:
+        top, bottom, left, right = padding_percent
+    pad_left, pad_right = _padding(left, right, padding_reference, width, mx1 - mx0)
+    pad_top, pad_bottom = _padding(top, bottom, padding_reference, height, my1 - my0)
 
-    x0 = max(0, mx0 - pad_x)
-    x1 = min(width, mx1 + pad_x)
-    y0 = max(0, my0 - pad_y)
-    y1 = min(height, my1 + pad_y)
+    x0 = max(0, mx0 - pad_left)
+    x1 = min(width, mx1 + pad_right)
+    y0 = max(0, my0 - pad_top)
+    y1 = min(height, my1 + pad_bottom)
 
     x0, x1, y0, y1 = _limit_aspect(x0, x1, y0, y1, width, height, max_aspect_ratio, mx0, mx1, my0, my1)
 
@@ -216,10 +237,21 @@ class MaskIntelligentCrop:
     def INPUT_TYPES(cls):
         return {
             "required": {
+                "padding_mode": (PADDING_MODES, {
+                    "default": "uniform",
+                    "tooltip": "uniform: padding_percent is used on every side. per_edge: padding_top, padding_bottom, padding_left and padding_right set each side separately.",
+                }),
                 "padding_percent": ("FLOAT", {
                     "default": 10.0, "min": 0.0, "max": 100.0, "step": 0.5,
-                    "tooltip": "How far each side extends beyond the masked area, as a percentage of the padding_reference size (width for left/right, height for top/bottom).",
+                    "tooltip": "uniform mode: how far each side extends beyond the masked area, as a percentage of the padding_reference size (width for left/right, height for top/bottom).",
                 }),
+                **{
+                    f"padding_{edge}": ("FLOAT", {
+                        "default": 10.0, "min": 0.0, "max": 100.0, "step": 0.5,
+                        "tooltip": f"per_edge mode: how far the {edge} side extends beyond the masked area, as a percentage of the padding_reference {axis}.",
+                    })
+                    for edge, axis in (("top", "height"), ("bottom", "height"), ("left", "width"), ("right", "width"))
+                },
                 "padding_reference": (PADDING_REFERENCES, {
                     "default": "crop",
                     "tooltip": "crop: percentage of the final cropped image, so the subject sits inside a border of that size. mask: percentage of the mask bounding box. image: percentage of the full input image.",
@@ -249,11 +281,13 @@ class MaskIntelligentCrop:
     CATEGORY = "RulZnodes"
     DESCRIPTION = (
         "Crop an image and/or mask to the mask's bounding box, extended on every side by "
-        "padding_percent of the crop, mask or image size. Both inputs are optional."
+        "a percentage of the crop, mask or image size: one value for all sides or one per "
+        "edge. Both inputs are optional."
     )
 
     def crop(self, padding_percent, padding_reference, aspect_limit, divisible_by, mask_threshold,
-             image=None, mask=None):
+             image=None, mask=None, padding_mode="uniform",
+             padding_top=10.0, padding_bottom=10.0, padding_left=10.0, padding_right=10.0):
         if image is None and mask is None:
             raise ValueError("Mask Intelligent Crop needs an image, a mask, or both.")
 
@@ -272,6 +306,8 @@ class MaskIntelligentCrop:
             height, width = int(mask.shape[1]), int(mask.shape[2])
 
         # Find the box on the native mask, then bring the mask to frame size.
+        if padding_mode == "per_edge":
+            padding_percent = (padding_top, padding_bottom, padding_left, padding_right)
         box = compute_crop_box(mask, padding_percent, divisible_by, mask_threshold, height, width,
                                padding_reference, ASPECT_LIMITS.get(aspect_limit))
         mask = _resize_mask(mask, height, width)

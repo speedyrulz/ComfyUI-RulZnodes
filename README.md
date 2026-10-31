@@ -77,15 +77,17 @@ on the next run.
 ## RulZ Mask Intelligent Crop
 
 `MaskIntelligentCrop`: crops an image and/or mask to the bounding box of the mask, then extends **every side**
-of that box by a percentage (default 10%). By default the percentage is measured against the **final crop**,
+of that box by a percentage (default 10%), either the same on all sides or set per edge. By default the percentage is measured against the **final crop**,
 so the subject ends up inside a 10% border. The padded box is clamped to the image bounds.
 
 | Input | Description |
 |---|---|
 | `image` (optional) | Image batch to crop. |
 | `mask` (optional) | Mask that defines the crop. If its resolution differs from the image it is resampled to the image size first. |
-| `padding_percent` | How far each side extends beyond the masked area. Left/right use this percentage of the reference **width**, top/bottom of the reference **height**. Default `10`. |
-| `padding_reference` | What the percentage is measured against. `crop` (default): the final cropped image, so each border is that share of the output. `mask`: the mask bounding box. `image`: the full input image. |
+| `padding_mode` | `uniform` (default): `padding_percent` is used on every side. `per_edge`: `padding_top`, `padding_bottom`, `padding_left` and `padding_right` set each side separately. The node only shows the fields for the selected mode. |
+| `padding_percent` | `uniform` mode. How far each side extends beyond the masked area. Left/right use this percentage of the reference **width**, top/bottom of the reference **height**. Default `10`. |
+| `padding_top` / `padding_bottom` / `padding_left` / `padding_right` | `per_edge` mode. How far that one side extends beyond the masked area, as a percentage of the reference **height** (top/bottom) or **width** (left/right). Default `10` each. |
+| `padding_reference` | What the percentages are measured against. `crop` (default): the final cropped image, so each border is that share of the output (with `crop`, two opposite borders together are capped at 90% and scaled down evenly beyond that). `mask`: the mask bounding box. `image`: the full input image. |
 | `aspect_limit` | Never crop more elongated than this ratio. Default `2:3 / 3:2`: a crop that would be taller than 2:3 is widened, one wider than 3:2 is heightened, centred on the subject and clamped to the image. The crop is only ever grown, never shrunk. `off` disables it. |
 | `divisible_by` | Grow the crop so width and height are multiples of this value. `1` disables it. The crop is only ever shrunk when the image is too small to grow, and never into the masked area. |
 | `mask_threshold` | Mask pixels above this value count as masked. Default `0` (any non-zero pixel). |
