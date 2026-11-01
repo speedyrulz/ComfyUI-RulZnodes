@@ -18,6 +18,7 @@
 | Node | What it does |
 |---|---|
 | [**RulZ Load Image (HEIC)**](#rulz-load-image-heic) | `LoadImage` replacement that also loads `.heic` / `.heif` and outputs the filename. |
+| [**RulZ Load Image Batch (HEIC)**](#rulz-load-image-batch-heic) | The HEIC loader with a list: drop several photos on it and each queued run uses the next one. |
 | [**RulZ Simple Load Image Batch**](#rulz-simple-load-image-batch) | Walks through every image in a folder, one image per queued run, and resumes where it stopped. |
 | [**RulZ Mask Intelligent Crop**](#rulz-mask-intelligent-crop) | Crops an image and/or mask to the mask's bounding box plus padding, with an aspect limit and divisible-by snapping. |
 | [**RulZ Resize Image Advanced**](#rulz-resize-image-advanced) | KJNodes-style Resize Image v2 with input-size passthrough, upscale-by and total-megapixel targets, and the output resolution shown on the node. |
@@ -61,6 +62,18 @@ handles the usual formats only.
 - Previews: browsers can't render HEIC, so `heic_preview.py` adds a middleware that serves `.heic` / `.heif`
   files as JPEG from ComfyUI's `/view` endpoint. The conversion happens in memory; no extra files are created.
 - EXIF rotation is applied, so phone photos come out upright.
+
+## RulZ Load Image Batch (HEIC)
+
+`LoadImageBatchHEIC`: the same loader and outputs as **RulZ Load Image (HEIC)**, but it holds a list of images.
+
+- Drag several images onto the node (or pick several with the upload button) to add them to the list. They
+  are uploaded to ComfyUI's input folder and added in filename order. Dropping more adds them to the end.
+- The node shows how many images are available, and the preview shows the first one.
+- Each queued run uses the first image and then moves on: the count drops by 1 and the preview shows the next
+  image. On the last image it stays put and the count stays at 1. Images added after that replace it.
+- Picking a file from the `image` dropdown also adds it to the list. **clear list** empties the list.
+- The list is saved with the workflow (in the node's properties), so it survives a reload.
 
 ## RulZ Simple Load Image Batch
 

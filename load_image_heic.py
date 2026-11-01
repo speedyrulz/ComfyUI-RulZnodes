@@ -118,7 +118,17 @@ class LoadImageWithFilenameHEIC:
         return True
 
 
-NODE_CLASS_MAPPINGS = {"LoadImageWithFilenameHEIC": LoadImageWithFilenameHEIC}
+class LoadImageBatchHEIC(LoadImageWithFilenameHEIC):
+    """Same loader as RulZ Load Image (HEIC). The list of dropped images lives in the
+    frontend (web/heic_batch.js), which moves `image` on to the next one after each
+    queued run, so the backend only ever loads the current image."""
+
+
+NODE_CLASS_MAPPINGS = {
+    "LoadImageWithFilenameHEIC": LoadImageWithFilenameHEIC,
+    "LoadImageBatchHEIC": LoadImageBatchHEIC,
+}
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "LoadImageWithFilenameHEIC": "RulZ Load Image (HEIC)"
+    "LoadImageWithFilenameHEIC": "RulZ Load Image (HEIC)",
+    "LoadImageBatchHEIC": "RulZ Load Image Batch (HEIC)",
 }
