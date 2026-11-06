@@ -9,8 +9,8 @@
 
 <p align="center">
   Nodes for ComfyUI: load HEIC photos with their filename, step through a folder one image per run,
-  crop to a mask with sensible padding, resize with megapixel and input-size targets, and turn off the
-  Comfy compiler per workflow.
+  crop to a mask with sensible padding, resize with megapixel and input-size targets, remove honeycomb skin
+  texture, and turn off the Comfy compiler per workflow.
 </p>
 
 ## Nodes
@@ -22,6 +22,7 @@
 | [**RulZ Simple Load Image Batch**](#rulz-simple-load-image-batch) | Walks through every image in a folder, one image per queued run, and resumes where it stopped. |
 | [**RulZ Mask Intelligent Crop**](#rulz-mask-intelligent-crop) | Crops an image and/or mask to the mask's bounding box plus padding, with an aspect limit and divisible-by snapping. |
 | [**RulZ Resize Image Advanced**](#rulz-resize-image-advanced) | KJNodes-style Resize Image v2 with input-size passthrough, upscale-by and total-megapixel targets, and the output resolution shown on the node. |
+| [**RulZ DeskinTexture**](#rulz-deskintexture) | Removes the honeycomb / orange-peel skin texture restoration models leave behind and puts natural grain back. |
 | [**RulZ Disable Comfy Compiler**](#rulz-disable-comfy-compiler) | Per-workflow replacement for the `--disable-comfy-compiler` launch flag. |
 
 All nodes are in the **RulZnodes** category of the node menu.
@@ -45,7 +46,8 @@ Use ComfyUI's own Python for the `pip install`. Restart ComfyUI and hard-refresh
 handles the usual formats only.
 
 > **Coming from the standalone packs?** Remove `ComfyUI-image-load-filename-heic`, `load-image-batch-simple`,
-> `mask-intelligent-crop`, `resize-image-v2-advanced` and `ComfyUI-DisableComfyCompiler` from `custom_nodes`.
+> `mask-intelligent-crop`, `resize-image-v2-advanced`, `ComfyUI-DeSkin` and `ComfyUI-DisableComfyCompiler` from
+> `custom_nodes`.
 > The node IDs are unchanged (only the display names gained a "RulZ" prefix), so existing workflows keep
 > working, but with both installed the same nodes are registered twice.
 
@@ -143,6 +145,53 @@ Everything else (stretch / resize / pad / pad_edge / pad_edge_pixel / crop / pil
 crop position, pad colour, mask handling, GPU device option, NVIDIA RTX VSR method) matches the original.
 The `nvidia_rtx_vsr` method needs the `nvidia-vfx` library and an NVIDIA RTX GPU.
 
+## RulZ DeskinTexture
+
+`DeSkinTexture`: removes the honeycomb / "orange-peel" texture that image restoration models (Qwen-Image and
+others) sometimes paint onto skin, and puts believable grain back so the result doesn't look like wax.
+
+It measures the image's frequency spectrum, finds the band of detail sizes where the fake pores stick up above
+the natural curve of a real photo, cuts only that band, and refills it with random, non-lattice texture. Larger
+shapes, shading and finer edges are untouched. A separate step (`screen_door`) notches out the exact 2 / 4 / 8 px
+grid that a VAE leaves behind. It needs no extra packages and falls back to the CPU if the GPU runs out of memory.
+
+| Input | Description |
+|---|---|
+| `image` | Image batch. RGBA is fine; the alpha channel is kept. |
+| `mask` (optional) | White = apply the fix. Overrides `mask_mode`. A face-parsing or SAM skin mask gives the cleanest result. |
+| `detect` | `auto` (default) finds the pattern size from the spectrum. `manual` uses `period_px`. |
+| `period_px` | Pattern cell size in pixels, `manual` mode only. Default `8`. |
+| `band_width` | How wide a band of detail sizes to remove. Lower keeps more real pores but may leave some pattern. Default `1`. |
+| `strength` | How completely the band is removed. Default `1`. |
+| `grain` | Random texture put back, as a fraction of what was removed at each spot. `0` = none (waxy), `0.7`-`0.9` = more skin-like. Default `0.5`. |
+| `mask_mode` | Used only with no mask connected. `auto_skin` (default): a rough skin-colour mask. `whole_image`: everything. |
+| `seed` | Grain pattern seed. |
+| `auto_threshold` | `auto` only applies the fix if the pattern is at least this many times the natural level inside the mask. Otherwise the image passes through and `info` names the size it found. Default `1.3`. |
+| `screen_door` | Removes the fine pixel-aligned 2 / 4 / 8 px grid, inside the mask only. `0` = off. Default `1`. |
+| `edge_protect` | Treats anything stronger than this many times the typical pattern as a real edge (lips, eyes, hems) and leaves it, plus a no-filter zone next to strong edges so silhouettes don't pick up a halo. `0` = off. Default `4`. |
+
+| Output | Description |
+|---|---|
+| `image` | The fixed image. |
+| `texture_removed` | What was taken out, amplified ×8 around mid-grey. A clean lattice on grey means the settings are right. |
+| `mask_used` | The mask that was applied. Use it to check the auto skin mask. |
+| `info` | Detected cell size and strength, mask coverage and amount removed. Connect it to a **Preview Any** node to read it; it is also printed in the console. |
+
+**Tuning:**
+
+- **Use a real skin mask when you can.** `auto_skin` is only a colour test: it can take wooden doors and warm
+  fabrics and miss very pale or warm-lit skin. Detection is measured inside the mask, so a good mask also makes
+  `auto` far more reliable.
+- **Pattern still visible:** raise `band_width` to `1.3`-`1.5`, or switch to `manual` with the cell size measured
+  at 100% zoom. A zoomed screenshot will fool you.
+- **Pattern survives next to an edge:** lower `edge_protect` to `2`-`3`. A band or halo along a silhouette means the
+  opposite: raise it.
+- **Too smooth or too noisy:** raise or lower `grain`.
+- **Fine striping at 100%:** that's the screen door, which is only fixed inside the mask. For a background that has
+  it too, run a second node with `mask_mode` = `whole_image`, `strength` `0` and `screen_door` `1`.
+- **Wrong size detected:** `auto` picks the strongest pattern, which can be fabric or hair if the honeycomb is
+  faint. `info` shows what it chose; use `manual` in that case.
+
 ## RulZ Disable Comfy Compiler
 
 `DisableComfyCompiler`: a per-workflow replacement for the `--disable-comfy-compiler` launch flag.
@@ -160,6 +209,8 @@ Start ComfyUI without `--disable-comfy-compiler` and place the node between your
 
 RulZ Resize Image Advanced is based on the Resize Image v2 node and pad helpers from
 [ComfyUI-KJNodes](https://github.com/kijai/ComfyUI-KJNodes) by kijai.
+
+RulZ DeskinTexture is based on ComfyUI-DeSkin 1.4.0 (MIT).
 
 ## License
 
