@@ -1,48 +1,73 @@
 import json
 import os
+import re
 import threading
 
-import numpy as np
 import torch
 from PIL import Image, ImageOps
 
+import folder_paths
+
+from .image_utils import to_float_rgb
+
 IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tiff", ".tif")
 
-# Progress is persisted per-directory in this file so a batch resumes from where
-# it left off, even across ComfyUI restarts.
-STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "batch_state.json")
+# Progress is persisted per-directory so a batch resumes from where it left off,
+# even across ComfyUI restarts. It lives in ComfyUI's user folder, which survives
+# updates of this pack. Progress saved by older versions inside the pack folder is
+# picked up until the new file exists.
+STATE_FILE = os.path.join(folder_paths.get_user_directory(), "rulznodes", "batch_state.json")
+_LEGACY_STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "batch_state.json")
 _lock = threading.Lock()
 
 
 def _load_state():
+    path = STATE_FILE if os.path.exists(STATE_FILE) else _LEGACY_STATE_FILE
     try:
-        with open(STATE_FILE, "r", encoding="utf-8") as f:
+        with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
     except Exception:
         return {}
 
 
 def _save_state(state):
-    tmp = STATE_FILE + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(state, f, indent=2)
-    os.replace(tmp, STATE_FILE)
+    try:
+        os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
+        tmp = STATE_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(state, f, indent=2)
+        os.replace(tmp, STATE_FILE)
+    except OSError as e:
+        # Losing the bookmark is better than failing the run.
+        print(f"[LoadImageBatchSimple] could not save progress to {STATE_FILE}: {e}")
+
+
+def _resolve_dir(directory):
+    """The directory as typed -> absolute path. Accepts ~ and surrounding quotes
+    (Windows "Copy as path" adds them). Empty means ComfyUI's input folder."""
+    directory = directory.strip().strip("\"'").strip()
+    if not directory:
+        return folder_paths.get_input_directory()
+    return os.path.abspath(os.path.expanduser(directory))
+
+
+def _natural_key(name):
+    # "img2" sorts before "img10", as in a file browser and the HEIC batch node.
+    return [int(part) if part.isdecimal() else part.lower() for part in re.split(r"(\d+)", name)]
 
 
 def _list_images(directory):
     if not os.path.isdir(directory):
         return []
     files = [f for f in os.listdir(directory) if f.lower().endswith(IMAGE_EXTS)]
-    files.sort(key=str.lower)
+    files.sort(key=_natural_key)
     return files
 
 
 def _load_image(path):
-    img = Image.open(path)
-    img = ImageOps.exif_transpose(img)
-    img = img.convert("RGB")
-    arr = np.array(img).astype(np.float32) / 255.0
-    return torch.from_numpy(arr)[None,]
+    with Image.open(path) as img:
+        img = ImageOps.exif_transpose(img)
+        return torch.from_numpy(to_float_rgb(img))[None,]
 
 
 class LoadImageBatchSimple:
@@ -55,7 +80,7 @@ class LoadImageBatchSimple:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "directory": ("STRING", {"default": "/home/jeff/input"}),
+                "directory": ("STRING", {"default": "", "tooltip": "Folder to read. Empty = ComfyUI's input folder. ~ and quoted paths work."}),
                 "reset": ("BOOLEAN", {"default": False, "label_on": "restart from first image", "label_off": "resume"}),
                 "loop": ("BOOLEAN", {"default": True, "label_on": "wrap around at end", "label_off": "stay on last image"}),
             }
@@ -73,6 +98,7 @@ class LoadImageBatchSimple:
 
     @classmethod
     def VALIDATE_INPUTS(cls, directory, reset, loop):
+        directory = _resolve_dir(directory)
         if not os.path.isdir(directory):
             return f"Directory not found: {directory}"
         if not _list_images(directory):
@@ -80,7 +106,7 @@ class LoadImageBatchSimple:
         return True
 
     def load(self, directory, reset, loop):
-        directory = os.path.abspath(os.path.expanduser(directory))
+        directory = _resolve_dir(directory)
         files = _list_images(directory)
         total = len(files)
         if total == 0:

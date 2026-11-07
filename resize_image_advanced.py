@@ -49,6 +49,8 @@ def string_to_color(color_string: str) -> List[int]:
         # CSV format (e.g. "255, 0, 0", "255, 0, 0, 128" or "1.0, 0.5, 0.0")
         try:
             values = [float(channel.strip()) for channel in color_string.split(',')]
+            if len(values) not in (3, 4):
+                raise ValueError("expected 3 (RGB) or 4 (RGBA) values")
             if all(0 <= v <= 1 for v in values):
                 color_list = [int(v * 255) for v in values]
             else:
@@ -86,10 +88,10 @@ def pad_image(image, left, right, top, bottom, color, pad_mode, mask=None):
         if HM != H or WM != W:
             mask = F.interpolate(mask.unsqueeze(1), size=(H, W), mode='nearest-exact').squeeze(1)
 
-    color_list = string_to_color(color)
-    bg_color = [x / 255.0 for x in color_list]
-    if len(bg_color) == 1:
-        bg_color = bg_color * 3
+    # Match the colour to the image's channels: an RGBA colour on an RGB image drops
+    # its alpha, an RGB colour on an RGBA image gets an opaque alpha.
+    bg_color = [x / 255.0 for x in string_to_color(color)][:C]
+    bg_color += [1.0] * (C - len(bg_color))
     bg_color = torch.tensor(bg_color, dtype=image.dtype, device=image.device)
 
     pad_left, pad_right, pad_top, pad_bottom = left, right, top, bottom
@@ -154,31 +156,21 @@ def pad_image(image, left, right, top, bottom, color, pad_mode, mask=None):
             out_masks[:, pad_top:pad_top + H, pad_left:pad_left + W] = 0.0
         return out_image, out_masks
 
-    out_image = torch.zeros((B, padded_height, padded_width, C), dtype=image.dtype, device=image.device)
-    for b in range(B):
-        if pad_mode == "edge":
+    if pad_mode == "edge_pixel":
+        # Repeat the outermost row/column (and corner pixels) outwards: exactly
+        # replicate padding, done in one call instead of per-row Python loops.
+        out_image = F.pad(image.movedim(-1, 1), (pad_left, pad_right, pad_top, pad_bottom), mode="replicate").movedim(1, -1)
+    elif pad_mode == "edge":
+        out_image = torch.zeros((B, padded_height, padded_width, C), dtype=image.dtype, device=image.device)
+        for b in range(B):
             out_image[b, :pad_top, :, :] = image[b, 0, :, :].mean(dim=0)
             out_image[b, pad_top + H:, :, :] = image[b, H - 1, :, :].mean(dim=0)
             out_image[b, :, :pad_left, :] = image[b, :, 0, :].mean(dim=0)
             out_image[b, :, pad_left + W:, :] = image[b, :, W - 1, :].mean(dim=0)
-            out_image[b, pad_top:pad_top + H, pad_left:pad_left + W, :] = image[b]
-        elif pad_mode == "edge_pixel":
-            for y in range(pad_top):
-                out_image[b, y, pad_left:pad_left + W, :] = image[b, 0, :, :]
-            for y in range(pad_top + H, padded_height):
-                out_image[b, y, pad_left:pad_left + W, :] = image[b, H - 1, :, :]
-            for x in range(pad_left):
-                out_image[b, pad_top:pad_top + H, x, :] = image[b, :, 0, :]
-            for x in range(pad_left + W, padded_width):
-                out_image[b, pad_top:pad_top + H, x, :] = image[b, :, W - 1, :]
-            out_image[b, :pad_top, :pad_left, :] = image[b, 0, 0, :]
-            out_image[b, :pad_top, pad_left + W:, :] = image[b, 0, W - 1, :]
-            out_image[b, pad_top + H:, :pad_left, :] = image[b, H - 1, 0, :]
-            out_image[b, pad_top + H:, pad_left + W:, :] = image[b, H - 1, W - 1, :]
-            out_image[b, pad_top:pad_top + H, pad_left:pad_left + W, :] = image[b]
-        else:
-            out_image[b, :, :, :] = bg_color.unsqueeze(0).unsqueeze(0)
-            out_image[b, pad_top:pad_top + H, pad_left:pad_left + W, :] = image[b]
+        out_image[:, pad_top:pad_top + H, pad_left:pad_left + W, :] = image
+    else:
+        out_image = bg_color.expand(B, padded_height, padded_width, C).clone()
+        out_image[:, pad_top:pad_top + H, pad_left:pad_left + W, :] = image
 
     if mask is not None:
         out_masks = F.pad(mask, (pad_left, pad_right, pad_top, pad_bottom), mode='replicate')
@@ -309,14 +301,42 @@ The resulting output resolution is shown on the node.
             device = torch.device("cpu")
 
         pillarbox_blur = keep_proportion == "pillarbox_blur"
+        pad_modes = keep_proportion.startswith("pad") or pillarbox_blur
         pad_left = pad_right = pad_top = pad_bottom = 0
 
-        if keep_proportion in ["resize", "total_pixels"] or keep_proportion.startswith("pad") or pillarbox_blur:
+        if pad_modes:
+            # The canvas is the requested size (a 0 follows image_1's aspect ratio)
+            # snapped to divisible_by. The image is fitted inside it without rounding
+            # and the rest is padding, so the output is exactly the canvas.
+            if width == 0 and height == 0:
+                canvas_w, canvas_h = W, H
+            elif width == 0:
+                canvas_w, canvas_h = W * height / H, height
+            elif height == 0:
+                canvas_w, canvas_h = width, H * width / W
+            else:
+                canvas_w, canvas_h = width, height
+            canvas_w = round_to_divisible(canvas_w, divisible_by)
+            canvas_h = round_to_divisible(canvas_h, divisible_by)
+
+            ratio = min(canvas_w / W, canvas_h / H)
+            width = min(canvas_w, max(1, round(W * ratio)))
+            height = min(canvas_h, max(1, round(H * ratio)))
+
+            # crop_position picks the side the image sits against.
+            extra_w, extra_h = canvas_w - width, canvas_h - height
+            pad_left = {"left": 0, "right": extra_w}.get(crop_position, extra_w // 2)
+            pad_top = {"top": 0, "bottom": extra_h}.get(crop_position, extra_h // 2)
+            pad_right, pad_bottom = extra_w - pad_left, extra_h - pad_top
+        elif keep_proportion in ["resize", "total_pixels"]:
             if keep_proportion == "total_pixels":
-                total_pixels = width * height
+                # A 0 dimension follows image_1's aspect ratio.
+                target_w = width or (height * W / H if height else W)
+                target_h = height or (width * H / W if width else H)
+                total_pixels = target_w * target_h
                 aspect_ratio = W / H
-                new_height = int(math.sqrt(total_pixels / aspect_ratio))
-                new_width = int(math.sqrt(total_pixels * aspect_ratio))
+                new_height = max(1, int(math.sqrt(total_pixels / aspect_ratio)))
+                new_width = max(1, int(math.sqrt(total_pixels * aspect_ratio)))
             elif width == 0 and height == 0:
                 new_width = W
                 new_height = H
@@ -333,33 +353,6 @@ The resulting output resolution is shown on the node.
                 new_width = round(W * ratio)
                 new_height = round(H * ratio)
 
-            if keep_proportion.startswith("pad") or pillarbox_blur:
-                if crop_position == "center":
-                    pad_left = (width - new_width) // 2
-                    pad_right = width - new_width - pad_left
-                    pad_top = (height - new_height) // 2
-                    pad_bottom = height - new_height - pad_top
-                elif crop_position == "top":
-                    pad_left = (width - new_width) // 2
-                    pad_right = width - new_width - pad_left
-                    pad_top = 0
-                    pad_bottom = height - new_height
-                elif crop_position == "bottom":
-                    pad_left = (width - new_width) // 2
-                    pad_right = width - new_width - pad_left
-                    pad_top = height - new_height
-                    pad_bottom = 0
-                elif crop_position == "left":
-                    pad_left = 0
-                    pad_right = width - new_width
-                    pad_top = (height - new_height) // 2
-                    pad_bottom = height - new_height - pad_top
-                elif crop_position == "right":
-                    pad_left = width - new_width
-                    pad_right = 0
-                    pad_top = (height - new_height) // 2
-                    pad_bottom = height - new_height - pad_top
-
             width = new_width
             height = new_height
         else:
@@ -369,11 +362,10 @@ The resulting output resolution is shown on the node.
                 height = H
 
         # Snap to the nearest multiple of divisible_by (KJ's original floors; "advanced" picks the closest).
-        if divisible_by > 1:
+        # The pad modes snapped their canvas above; the image inside it stays unrounded.
+        if divisible_by > 1 and not pad_modes:
             width = round_to_divisible(width, divisible_by)
             height = round_to_divisible(height, divisible_by)
-            # Nearest rounding can grow the content past the pad canvas; never pad negatively.
-            pad_left, pad_right, pad_top, pad_bottom = (max(0, p) for p in (pad_left, pad_right, pad_top, pad_bottom))
 
         # NVIDIA RTX Video Super Resolution setup
         nvvfx_sr = None
@@ -430,6 +422,9 @@ The resulting output resolution is shown on the node.
                     dlpack_out = nvvfx_sr.run(frames_chw[j]).image
                     upscaled_frames.append(torch.from_dlpack(dlpack_out).clone())
                 out_image = torch.stack(upscaled_frames, dim=0).movedim(1, -1).cpu()
+                # VSR outputs multiples of 8; bring it to the exact size the rest expects.
+                if out_image.shape[1] != height or out_image.shape[2] != width:
+                    out_image = common_upscale(out_image.movedim(-1, 1), width, height, "bilinear", crop="disabled").movedim(1, -1)
                 if out_mask is not None:
                     out_mask = common_upscale(out_mask.unsqueeze(1), width, height, "bilinear", crop="disabled").squeeze(1)
             else:
@@ -440,17 +435,7 @@ The resulting output resolution is shown on the node.
                     else:
                         out_mask = common_upscale(out_mask.unsqueeze(1), width, height, upscale_method, crop="disabled").squeeze(1)
 
-            if (keep_proportion.startswith("pad") or pillarbox_blur) and (pad_left > 0 or pad_right > 0 or pad_top > 0 or pad_bottom > 0):
-                padded_width = width + pad_left + pad_right
-                padded_height = height + pad_top + pad_bottom
-                if divisible_by > 1:
-                    width_remainder = padded_width % divisible_by
-                    height_remainder = padded_height % divisible_by
-                    if width_remainder > 0:
-                        pad_right += divisible_by - width_remainder
-                    if height_remainder > 0:
-                        pad_bottom += divisible_by - height_remainder
-
+            if pad_modes and (pad_left > 0 or pad_right > 0 or pad_top > 0 or pad_bottom > 0):
                 pad_mode = (
                     "pillarbox_blur" if pillarbox_blur else
                     "edge" if keep_proportion == "pad_edge" else
@@ -461,40 +446,48 @@ The resulting output resolution is shown on the node.
 
             return out_image, out_mask
 
-        if per_batch == 0 or B <= per_batch:
-            out_image, out_mask = _process_subbatch(image, mask, pad_left, pad_right, pad_top, pad_bottom)
-        else:
-            chunks = []
-            mask_chunks = [] if mask is not None else None
-            total_batches = (B + per_batch - 1) // per_batch
-            current_batch = 0
-            for start_idx in range(0, B, per_batch):
-                current_batch += 1
-                end_idx = min(start_idx + per_batch, B)
-                sub_img = image[start_idx:end_idx]
-                sub_mask = mask[start_idx:end_idx] if mask is not None else None
-                sub_out_img, sub_out_mask = _process_subbatch(sub_img, sub_mask, pad_left, pad_right, pad_top, pad_bottom)
-                chunks.append(sub_out_img.cpu())
-                if mask is not None:
-                    mask_chunks.append(sub_out_mask.cpu() if sub_out_mask is not None else None)
-                if unique_id and PromptServer is not None:
-                    try:
-                        PromptServer.instance.send_progress_text(
-                            f"<tr><td>Resize v2 Adv</td><td>batch {current_batch}/{total_batches} · images {end_idx}/{B}</td></tr>",
-                            unique_id
-                        )
-                    except Exception:
-                        pass
-                else:
-                    logging.info(f"[ResizeImageV2Advanced] batch {current_batch}/{total_batches} · images {end_idx}/{B}")
-            out_image = torch.cat(chunks, dim=0)
-            if mask is not None and any(m is not None for m in mask_chunks):
-                out_mask = torch.cat([m for m in mask_chunks if m is not None], dim=0)
-            else:
-                out_mask = None
+        # A single mask for a whole batch (e.g. one mask for a video) is applied to
+        # every chunk and returned once, as it is when the batch fits in one chunk.
+        shared_mask = mask is not None and mask.shape[0] == 1
 
-        if nvvfx_ctx is not None:
-            nvvfx_ctx.__exit__(None, None, None)
+        try:
+            if per_batch == 0 or B <= per_batch:
+                out_image, out_mask = _process_subbatch(image, mask, pad_left, pad_right, pad_top, pad_bottom)
+            else:
+                chunks = []
+                mask_chunks = []
+                total_batches = (B + per_batch - 1) // per_batch
+                current_batch = 0
+                for start_idx in range(0, B, per_batch):
+                    current_batch += 1
+                    end_idx = min(start_idx + per_batch, B)
+                    sub_img = image[start_idx:end_idx]
+                    sub_mask = None if mask is None else (mask if shared_mask else mask[start_idx:end_idx])
+                    sub_out_img, sub_out_mask = _process_subbatch(sub_img, sub_mask, pad_left, pad_right, pad_top, pad_bottom)
+                    chunks.append(sub_out_img.cpu())
+                    # Includes the mask the pad modes generate when no mask is connected.
+                    if sub_out_mask is not None:
+                        mask_chunks.append(sub_out_mask.cpu())
+                    if unique_id and PromptServer is not None:
+                        try:
+                            PromptServer.instance.send_progress_text(
+                                f"<tr><td>Resize v2 Adv</td><td>batch {current_batch}/{total_batches} · images {end_idx}/{B}</td></tr>",
+                                unique_id
+                            )
+                        except Exception:
+                            pass
+                    else:
+                        logging.info(f"[ResizeImageV2Advanced] batch {current_batch}/{total_batches} · images {end_idx}/{B}")
+                out_image = torch.cat(chunks, dim=0)
+                if not mask_chunks:
+                    out_mask = None
+                elif shared_mask and all(m.shape[0] == 1 for m in mask_chunks):
+                    out_mask = mask_chunks[0]
+                else:
+                    out_mask = torch.cat(mask_chunks, dim=0)
+        finally:
+            if nvvfx_ctx is not None:
+                nvvfx_ctx.__exit__(None, None, None)
 
         out_w, out_h = out_image.shape[2], out_image.shape[1]
         out_mp = (out_w * out_h) / (1024 * 1024)

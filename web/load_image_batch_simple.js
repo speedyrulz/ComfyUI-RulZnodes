@@ -16,7 +16,9 @@ app.registerExtension({
         w.disabled = true;
       }
       w.value = text;
-      this.setSize(this.computeSize());
+      // Grow to fit the status line, but keep any size the user dragged it to.
+      const size = this.computeSize();
+      this.setSize([Math.max(this.size[0], size[0]), Math.max(this.size[1], size[1])]);
       app.graph.setDirtyCanvas(true, true);
     };
   },

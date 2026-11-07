@@ -65,6 +65,9 @@ handles the usual formats only.
 - Previews: browsers can't render HEIC, so `heic_preview.py` adds a middleware that serves `.heic` / `.heif`
   files as JPEG from ComfyUI's `/view` endpoint. The conversion happens in memory; no extra files are created.
 - EXIF rotation is applied, so phone photos come out upright.
+- 16-bit greyscale PNG / TIFF files load at their full range (the stock conversion turns them almost white).
+- Multi-picture JPEGs (MPO, from many phones and cameras) load as the main photo only, not as a batch with
+  the hidden second view or depth map.
 
 ## RulZ Load Image Batch (HEIC)
 
@@ -84,16 +87,17 @@ handles the usual formats only.
 
 | Input | Description |
 |---|---|
-| `directory` | Folder to read (default `/home/jeff/input`). The image count is detected automatically. |
+| `directory` | Folder to read. Empty (the default) reads ComfyUI's `input` folder. `~` and paths in quotes (Windows **Copy as path**) work. The image count is detected automatically. |
 | `reset` | On: start again from the first image. Off: resume from where the last run stopped. |
 | `loop` | On: wrap around to the first image after the last one. Off: keep returning the last image. |
 
 **Outputs:** `image`, `filename`, `total_images`, `current_index` (0-based). The node also shows
 `current / total — filename` after each run.
 
-Progress is saved per directory in `batch_state.json` in the pack folder, so queueing 5 runs and then 5 more
-covers all 10 images, even across a ComfyUI restart. Files added to or removed from the folder are picked up
-on the next run.
+Images are taken in natural filename order (`img2` before `img10`). Progress is saved per directory in
+`ComfyUI/user/rulznodes/batch_state.json`, so queueing 5 runs and then 5 more covers all 10 images, even across
+a ComfyUI restart or an update of this pack. Files added to or removed from the folder are picked up on the
+next run.
 
 ## RulZ Mask Intelligent Crop
 
@@ -138,7 +142,8 @@ No dependency on ComfyUI-KJNodes.
 | `total_megapixels` | Float ≥ 0.01. Rescales the target size (keeping its aspect ratio) to the nearest total pixel count. 1 MP = 1024×1024 px, same as ComfyUI's *ImageScaleToTotalPixels*. |
 | Output resolution | Shown on the node after execution (`W x H (MP) \| image_1 W x H \| image_2 W x H`). |
 | Defaults | `upscale_method = lanczos`, `keep_proportion = crop`, `divisible_by = 32`. |
-| Rounding | All computed sizes are rounded to the **nearest** multiple of `divisible_by` (KJ's original rounds down). |
+| Rounding | All computed sizes are rounded to the **nearest** multiple of `divisible_by` (KJ's original rounds down). In the pad modes (`pad`, `pad_edge`, `pad_edge_pixel`, `pillarbox_blur`) the rounded size is the canvas: the image is fitted inside it and the rest is padding, so the output is exactly that size. |
+| Pad colour | `R, G, B`, `R, G, B, A`, `#RRGGBB`, `#RRGGBBAA`, a colour name or one grey value. An alpha value is dropped for RGB images. |
 
 **Outputs:** `IMAGE`, `width`, `height`, `mask`.
 
