@@ -25,6 +25,9 @@ try:
 except Exception:                       # running outside ComfyUI (tests)
     _DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+# torch.OutOfMemoryError (torch 2.5+) also covers non-CUDA backends.
+_OOM_ERROR = getattr(torch, "OutOfMemoryError", torch.cuda.OutOfMemoryError)
+
 
 # ----------------------------------------------------------------------------
 # frequency helpers (rfft2 layout: last dim is W//2+1)
@@ -183,26 +186,41 @@ def auto_skin_mask(rgb):
     return gaussian_blur(m, 8.0).clamp(0, 1)                          # feather
 
 
-def edge_zone(lum, mask, radius, k=8.0):
-    """[B,1,H,W] weight that is 0 within `radius` px of a strong edge and 1 elsewhere.
+_MEDIAN_SAMPLES = 200000
+
+
+def _masked_median(values, mask):
+    """Median of `values` where mask > 0.5, from an evenly strided subsample of at most
+    _MEDIAN_SAMPLES pixels: deterministic, and no full-size random permutation."""
+    sel = values[mask > 0.5]
+    if sel.numel() == 0:
+        return 0.0
+    if sel.numel() > _MEDIAN_SAMPLES:
+        sel = sel[::math.ceil(sel.numel() / _MEDIAN_SAMPLES)]
+    return sel.median().item()
+
+
+def strong_edges(lum, mask, k=8.0):
+    """[B,1,H,W] 0/1 map of strong edges, or None if the mask has no gradient to measure.
     'Strong' = gradient > k x the median gradient inside the mask (the honeycomb's own
-    gradient is ~1/255 per px; silhouettes, hems and lips are 10-40x that).  Any linear
-    filter rings for about its own spatial extent on either side of such an edge, so the
-    fix is simply not to apply it there."""
-    if radius <= 0:
-        return torch.ones_like(lum)
+    gradient is ~1/255 per px; silhouettes, hems and lips are 10-40x that)."""
     g = gaussian_blur(lum, 1.0)
     gx = torch.zeros_like(g); gy = torch.zeros_like(g)
     gx[..., :, 1:-1] = (g[..., :, 2:] - g[..., :, :-2]) * 0.5
     gy[..., 1:-1, :] = (g[..., 2:, :] - g[..., :-2, :]) * 0.5
     grad = torch.sqrt(gx * gx + gy * gy)
-    sel = grad[mask > 0.5]
-    if sel.numel() > 1000:
-        sel = sel[torch.randperm(sel.numel(), device=sel.device)[:200000]]
-    med = sel.median().item() if sel.numel() else 0.0
+    med = _masked_median(grad, mask)
     if med <= 0:
-        return torch.ones_like(lum)
-    strong = (grad > k * med).float()
+        return None
+    return (grad > k * med).float()
+
+
+def edge_zone(strong, radius):
+    """Weight that is 0 within `radius` px of a strong edge (from strong_edges) and 1
+    elsewhere.  Any linear filter rings for about its own spatial extent on either side
+    of such an edge, so the fix is simply not to apply it there."""
+    if strong is None or radius <= 0:
+        return 1.0
     z = gaussian_blur(strong, radius / 2.0)                      # soft dilation
     return (1.0 - (z / 0.02).clamp(0, 1)) ** 2                    # 0 inside the zone, 1 outside
 
@@ -213,10 +231,7 @@ def amplitude_core(component, mask, factor):
     if factor <= 0:
         return component, 0.0
     amp = gaussian_blur(component.abs().mean(dim=1, keepdim=True), 1.0)
-    sel = amp[mask > 0.5]
-    if sel.numel() > 1000:
-        sel = sel[torch.randperm(sel.numel(), device=sel.device)[:200000]]
-    med = sel.median().item() if sel.numel() else 0.0
+    med = _masked_median(amp, mask)
     if med <= 0:
         return component, 0.0
     keep = torch.exp(-(amp / (factor * med)) ** 2)
@@ -307,12 +322,13 @@ def deskin(rgb, mask=None, period_px=None, band_width=1.0, strength=1.0,
     #       The band-reject's extent is ~1.5 cells; the razor-thin grid notches
     #       ring for ~20 px.
     if edge_protect > 0:
+        strong = strong_edges(lum4, m, k=2 * edge_protect)       # shared by both zones
         honeycomb, held = amplitude_core(honeycomb, m, edge_protect)
-        honeycomb = honeycomb * edge_zone(lum4, m, 1.5 / f0, k=2 * edge_protect)
+        honeycomb = honeycomb * edge_zone(strong, 1.5 / f0)
         info += f" | edge-protect {edge_protect:.1f}x ({held*100:.0f}% of mask held back)"
         if grid is not None:
             grid, _ = amplitude_core(grid, m, edge_protect)
-            grid = grid * edge_zone(lum4, m, 20.0, k=2 * edge_protect)
+            grid = grid * edge_zone(strong, 20.0)
     removed = honeycomb if grid is None else honeycomb + grid
     if grid is not None:
         info += f" | screen-door {screen_door:.2f}"
@@ -407,11 +423,19 @@ class DeSkinTexture:
                 edge_protect=edge_protect, screen_door=screen_door)
             return out, removed, m_used, info
 
+        result = None
         try:
-            out, removed, m_used, info = _go(_DEVICE)
-        except torch.cuda.OutOfMemoryError:
-            torch.cuda.empty_cache()
-            out, removed, m_used, info = _go(torch.device("cpu"))
+            result = _go(_DEVICE)
+        except _OOM_ERROR:
+            pass
+        if result is None:
+            # Retry outside the except block: inside it, the traceback still holds the
+            # failed attempt's GPU tensors and empty_cache() could not free them.
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            print("[DeskinTexture] out of GPU memory, running on the CPU instead")
+            result = _go(torch.device("cpu"))
+        out, removed, m_used, info = result
 
         out = out.permute(0, 2, 3, 1).cpu()
         if C == 4:                                                  # keep alpha

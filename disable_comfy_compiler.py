@@ -29,7 +29,8 @@ class DisableComfyCompiler:
         previous = m.model_options.get("model_function_wrapper")
 
         def wrapper(apply_model, wrapper_args):
-            old = (args.disable_comfy_compiler, args.disable_cuda_graphs)
+            # getattr: ComfyUI builds from before the compiler don't have these flags.
+            old = (getattr(args, "disable_comfy_compiler", False), getattr(args, "disable_cuda_graphs", False))
             args.disable_comfy_compiler = True
             args.disable_cuda_graphs = True
             try:

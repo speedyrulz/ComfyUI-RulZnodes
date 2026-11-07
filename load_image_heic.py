@@ -8,6 +8,8 @@ from PIL import Image, ImageOps, ImageSequence
 import folder_paths
 import node_helpers
 
+from .image_utils import to_float_rgb
+
 try:
     from pillow_heif import register_heif_opener
 
@@ -67,20 +69,19 @@ class LoadImageWithFilenameHEIC:
         output_masks = []
         w, h = None, None
 
-        for frame in ImageSequence.Iterator(img):
+        # Multi-picture JPEGs (MPO, from many phones and cameras) store extras such
+        # as a second stereo view or a depth map as further frames; only the first
+        # one is the photo.
+        frames = (img,) if img.format == "MPO" else ImageSequence.Iterator(img)
+        for frame in frames:
             frame = node_helpers.pillow(ImageOps.exif_transpose, frame)
 
-            if frame.mode == "I":
-                frame = frame.point(lambda i: i * (1 / 255))
-            rgb = frame.convert("RGB")
-
             if not output_images:
-                w, h = rgb.size
-            if rgb.size != (w, h):
+                w, h = frame.size
+            if frame.size != (w, h):
                 continue
 
-            arr = np.array(rgb).astype(np.float32) / 255.0
-            output_images.append(torch.from_numpy(arr)[None,])
+            output_images.append(torch.from_numpy(to_float_rgb(frame))[None,])
 
             if "A" in frame.getbands():
                 alpha = np.array(frame.getchannel("A")).astype(np.float32) / 255.0
