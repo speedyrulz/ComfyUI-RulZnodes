@@ -10,7 +10,7 @@
 <p align="center">
   Nodes for ComfyUI: load HEIC photos with their filename, step through a folder one image per run,
   crop to a mask with sensible padding, resize with megapixel and input-size targets, remove honeycomb skin
-  texture, and turn off the Comfy compiler per workflow.
+  texture, turn off the Comfy compiler per workflow, and pick a random prompt from a text file.
 </p>
 
 ## Nodes
@@ -24,6 +24,7 @@
 | [**RulZ Resize Image Advanced**](#rulz-resize-image-advanced) | KJNodes-style Resize Image v2 with input-size passthrough, upscale-by and total-megapixel targets, and the output resolution shown on the node. |
 | [**RulZ DeskinTexture**](#rulz-deskintexture) | Removes the honeycomb / orange-peel skin texture restoration models leave behind and puts natural grain back. |
 | [**RulZ Disable Comfy Compiler**](#rulz-disable-comfy-compiler) | Per-workflow replacement for the `--disable-comfy-compiler` launch flag. |
+| [**RulZ Random Prompt Selector**](#rulz-random-prompt-selector) | Outputs a random line from a text file of prompts, chosen by the seed. |
 
 All nodes are in the **RulZnodes** category of the node menu.
 
@@ -204,6 +205,24 @@ Start ComfyUI without `--disable-comfy-compiler` and place the node between your
 
 - Tested on ComfyUI 0.37.0 with Qwen Image 2.1.
 - Only the diffusion model is covered; text encoders and latent previews are not affected.
+
+## RulZ Random Prompt Selector
+
+`RandomPromptSelector`: outputs one line from a text file of prompts, chosen by the seed.
+
+| Input | Description |
+|---|---|
+| `prompt_file` | The `.txt` file to read, one prompt per line. Lists the `.txt` files in ComfyUI's `input` folder. |
+| `seed` | Picks the line. The same seed and file always give the same prompt. |
+
+**Output:** `prompt`.
+
+- **browse for text file** uploads a file from your computer into ComfyUI's `input` folder and selects it.
+  Browsers can't give a node the path of a local file, so the node reads that copy: after editing the original,
+  browse for it again to replace the copy. A file with the same name in `input` is overwritten.
+- Blank lines and spaces around a line are ignored.
+- Set `control after generate` to `randomize` for a new prompt each run, or `fixed` to keep the same one. Editing
+  the file in `input` is picked up on the next run.
 
 ## Credits
 
