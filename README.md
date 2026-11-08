@@ -10,7 +10,8 @@
 <p align="center">
   Nodes for ComfyUI: load HEIC photos with their filename, step through a folder one image per run,
   crop to a mask with sensible padding, resize with megapixel and input-size targets, remove honeycomb skin
-  texture, turn off the Comfy compiler per workflow, and pick a random prompt from a text file.
+  texture, turn off the Comfy compiler per workflow, pick a random prompt from a text file, and run Qwen Image 2.1
+  attention block-sparse.
 </p>
 
 ## Nodes
@@ -25,6 +26,7 @@
 | [**RulZ DeskinTexture**](#rulz-deskintexture) | Removes the honeycomb / orange-peel skin texture restoration models leave behind and puts natural grain back. |
 | [**RulZ Disable Comfy Compiler**](#rulz-disable-comfy-compiler) | Per-workflow replacement for the `--disable-comfy-compiler` launch flag. |
 | [**RulZ Random Prompt Selector**](#rulz-random-prompt-selector) | Outputs a random line from a text file of prompts, chosen by the seed. |
+| [**RulZ Qwen Sparse Sage Attention**](#rulz-qwen-sparse-sage-attention) | Block-sparse SageAttention for Qwen Image 2.1: about 20% faster sampling steps at 4 MP with SageAttention's quality. |
 
 All nodes are in the **RulZnodes** category of the node menu.
 
@@ -229,6 +231,38 @@ Start ComfyUI without `--disable-comfy-compiler` and place the node between your
 - Set `control after generate` to `randomize` for a new prompt each run, or `fixed` to keep the same one. Editing
   the file in `input` is picked up on the next run.
 
+## RulZ Qwen Sparse Sage Attention
+
+`QwenSparseSageAttention`: block-sparse SageAttention 2 for Qwen Image 2.1.
+
+From the second sampling step on, Qwen Image 2.1 reuses cached text and reference-image keys, and the image being
+generated puts most of its attention on a minority of them. On that step the node estimates, for every layer, which
+64-token key blocks hold `tau` of the attention, then computes only those for the rest of the run with a copy of
+SageAttention's kernel that skips the other blocks. With every block kept the kernel gives SageAttention's exact
+output.
+
+| Input | Description |
+|---|---|
+| `model` | A Qwen Image 2.1 model. Other models pass through with plain SageAttention. |
+| `tau` | Share of the estimated attention kept. 0.99 matched plain SageAttention's quality in testing; lower is faster and less exact. |
+| `dense_layers` | Transformer blocks that always run dense, e.g. `0, 30-31`. Block 0 attends almost everywhere, so it is dense by default. |
+
+**Output:** `model`.
+
+Use it instead of **Patch Sage Attention KJ**, or after it: anything the node doesn't make sparse (the first step,
+masked prefix attention, the dense layers) runs through the attention patch before it, or SageAttention if there is
+none. A Sage patch placed after this node replaces it.
+
+On an RTX 5060 Ti with an int8 Qwen Image 2.1 Edit model, 8 steps at 1728x2304 (4 MP) with one 4 MP reference,
+sampling steps took 3.45 s instead of 4.5 s, and the output matched plain SageAttention as closely as SageAttention
+matches full-precision attention. At 1 MP the steps are about 18% faster, but the one-time block estimate on the
+second step takes most of that back.
+
+- Needs SageAttention 2.2 (`sageattention`) and an RTX 40 (sm89) or RTX 50 (sm120) GPU.
+- Needs the CUDA toolkit (`nvcc`) and a C++ compiler: the first run builds the kernel, which takes 2 to 3 minutes,
+  and later runs load it. Without them, or on other GPUs, attention stays dense and the console says why.
+- Tested on Linux (WSL2) with ComfyUI 0.44.0, PyTorch 2.15 and CUDA 13.4.
+
 ## Credits
 
 RulZ Resize Image Advanced is based on the Resize Image v2 node and pad helpers from
@@ -236,7 +270,11 @@ RulZ Resize Image Advanced is based on the Resize Image v2 node and pad helpers 
 
 RulZ DeskinTexture is based on ComfyUI-DeSkin 1.4.0 (MIT).
 
+RulZ Qwen Sparse Sage Attention's kernel in `sparse_sage/csrc` is SageAttention 2
+([thu-ml/SageAttention](https://github.com/thu-ml/SageAttention)), changed to skip key blocks.
+
 ## License
 
 [GPL-3.0](LICENSE). RulZ Resize Image Advanced is derived from GPL-3.0 code in ComfyUI-KJNodes, so the
-pack as a whole is released under the same license.
+pack as a whole is released under the same license. `sparse_sage/csrc` keeps SageAttention's
+[Apache-2.0](sparse_sage/LICENSE) license.
