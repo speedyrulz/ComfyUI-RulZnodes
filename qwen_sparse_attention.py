@@ -19,7 +19,7 @@ import torch
 import comfy.model_management
 import comfy.patcher_extension
 
-from .sparse_sage import BK, mask_to_lut, predict, sage_nhd, sageattn, sparse_sageattn, unsupported_reason
+from .sparse_sage import BK, mask_to_lut, predict, sage_dense, sageattn, sparse_sageattn, unsupported_reason
 
 try:
     from comfy.ldm.qwen_image21.model import QwenImage21Transformer2DModel
@@ -104,8 +104,8 @@ class SparsePatch:
                 return out
         if self.previous is not None:
             return self.previous(func, q, k, v, heads, mask=mask, **kwargs)
-        if mask is None and sageattn is not None and q.dim() == 3 and not kwargs.get("skip_reshape", False) and q.dtype in (torch.float16, torch.bfloat16):
-            return sage_nhd(q, k, v, heads)
+        if mask is None and sageattn is not None and q.dim() == (4 if kwargs.get("skip_reshape", False) else 3) and q.dtype in (torch.float16, torch.bfloat16):
+            return sage_dense(q, k, v, heads, kwargs.get("skip_output_reshape", False))
         return func(q, k, v, heads, mask=mask, **kwargs)
 
     def sparse(self, q, k, v, heads, transformer_options):

@@ -64,11 +64,16 @@ def load():
     return _ext
 
 
-def sage_nhd(q, k, v, heads):
-    """sageattn on (B, N, heads * D) tensors, called the way Patch Sage Attention KJ's 'auto' mode calls it."""
+def sage_dense(q, k, v, heads, skip_output_reshape=False):
+    """sageattn as Patch Sage Attention KJ's 'auto' mode calls it, on (B, N, heads * D) tensors or skip_reshape
+    (B, H, N, D) ones (Flux). Returns (B, N, heads * D), or (B, H, N, D) with skip_output_reshape."""
+    if q.dim() == 4:
+        out = sageattn(q, k, v, tensor_layout="HND", is_causal=False)
+        return out if skip_output_reshape else out.transpose(1, 2).flatten(2)
     b, nq, c = q.shape
     d = c // heads
-    return sageattn(q.view(b, nq, heads, d), k.view(b, -1, heads, d), v.view(b, -1, heads, d), tensor_layout="NHD", is_causal=False).reshape(b, nq, c)
+    out = sageattn(q.view(b, nq, heads, d), k.view(b, -1, heads, d), v.view(b, -1, heads, d), tensor_layout="NHD", is_causal=False)
+    return out.transpose(1, 2) if skip_output_reshape else out.reshape(b, nq, c)
 
 
 def sparse_sageattn(q, k, v, lut, count):

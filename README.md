@@ -258,6 +258,11 @@ sampling steps took 3.45 s instead of 4.5 s, and the output matched plain SageAt
 matches full-precision attention. At 1 MP the steps are about 18% faster, but the one-time block estimate on the
 second step takes most of that back.
 
+Flux 2 (Klein) is not made sparse by this node: every token, reference included, attends every other token, and
+ComfyUI's built-in **Model Sparse Attention** node (method `sol-attn`) handles that layout faster. With Klein 9B
+int8 at 1792x2336 and a 4 MP reference, 4 steps, it took steps from 10.8 s to 8.4 s on an RTX 5060 Ti and from 14.4 s
+to 10.8 s on an RTX 4060 Ti at `tau` 0.8, with no visible change.
+
 - Needs SageAttention 2.2 (`sageattention`) and an RTX 40 (sm89) or RTX 50 (sm120) GPU.
 - Needs the CUDA toolkit (`nvcc`) and a C++ compiler: the first run builds the kernel, which takes 2 to 3 minutes,
   and later runs load it. Without them, or on other GPUs, attention stays dense and the console says why.
