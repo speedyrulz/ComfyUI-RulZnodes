@@ -10,8 +10,8 @@
 <p align="center">
   Nodes for ComfyUI: load HEIC photos with their filename, step through a folder one image per run,
   crop to a mask with sensible padding, resize with megapixel and input-size targets, remove honeycomb skin
-  texture, turn off the Comfy compiler per workflow, pick a random prompt from a text file, and run Qwen Image 2.1
-  attention block-sparse.
+  texture, turn off the Comfy compiler per workflow, pick a random prompt from a text file, mask a person by
+  clicking them, and run Qwen Image 2.1 attention block-sparse.
 </p>
 
 ## Nodes
@@ -27,6 +27,7 @@
 | [**RulZ DeskinTexture**](#rulz-deskintexture) | Removes the honeycomb / orange-peel skin texture restoration models leave behind and puts natural grain back. |
 | [**RulZ Disable Comfy Compiler**](#rulz-disable-comfy-compiler) | Per-workflow replacement for the `--disable-comfy-compiler` launch flag. |
 | [**RulZ Random Prompt Selector**](#rulz-random-prompt-selector) | Outputs a random line from a text file of prompts, chosen by the seed. |
+| [**RulZ Person Select (SAM3)**](#rulz-person-select-sam3) | Load an image, click a person on the node, and get a mask of that person and a mask of everyone else. |
 | [**RulZ Qwen Sparse Sage Attention**](#rulz-qwen-sparse-sage-attention) | Block-sparse SageAttention for Qwen Image 2.1: about 20% faster sampling steps at 4 MP with SageAttention's quality. |
 
 All nodes are in the **RulZnodes** category of the node menu.
@@ -252,6 +253,33 @@ Start ComfyUI without `--disable-comfy-compiler` and place the node between your
 - Blank lines and spaces around a line are ignored.
 - Set `control after generate` to `randomize` for a new prompt each run, or `fixed` to keep the same one. Editing
   the file in `input` is picked up on the next run.
+
+## RulZ Person Select (SAM3)
+
+`RulZPersonSelect`: an image loader with a clickable preview. SAM 3 finds every person in the image, the node
+tints each one, and the one you click becomes the mask.
+
+Needs a ComfyUI version with built-in SAM 3 support (the **SAM3 Detect** node) and a SAM 3 or SAM 3.1
+checkpoint in `models/checkpoints`. Nothing else is installed or downloaded.
+
+| Input | Description |
+|---|---|
+| `image` | The image to load, from ComfyUI's `input` folder. **Upload image** or dropping a file on the node adds one. HEIC/HEIF works. |
+| `sam3_model` | The SAM 3 checkpoint. The node loads it itself; no loader node is needed. |
+| `prompt` | What SAM 3 looks for. Default `person`. Separate several things with commas, e.g. `person, dog`. |
+| `max_detections` | Most matches to find per prompt. |
+| `threshold` | Detection confidence. Lower it if someone is not found. |
+
+**Outputs:** `image`, `mask` (what you clicked), `others_mask` (everything else that was detected, minus what
+you clicked).
+
+- **Click** a tinted person to select them; they turn green. Click them again to deselect.
+- **Shift-click** (or Ctrl-click) adds or removes a person, so several can be selected.
+- Clicking something that was not detected asks SAM 3 for whatever is at that point and selects that.
+- The selection is saved with the workflow as click positions, so it is cleared when you change the image.
+- The preview runs SAM 3 when the image or a setting changes: a few seconds the first time while the model
+  loads, about a second per new image after that. It waits while a workflow is running.
+- Queuing with nothing selected stops the workflow with an error, so an empty mask is never passed on.
 
 ## RulZ Qwen Sparse Sage Attention
 

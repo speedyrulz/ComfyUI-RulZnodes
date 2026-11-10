@@ -8,6 +8,8 @@ from .load_image_heic import NODE_CLASS_MAPPINGS as _HEIC_NODES
 from .load_image_heic import NODE_DISPLAY_NAME_MAPPINGS as _HEIC_NAMES
 from .mask_intelligent_crop import NODE_CLASS_MAPPINGS as _CROP_NODES
 from .mask_intelligent_crop import NODE_DISPLAY_NAME_MAPPINGS as _CROP_NAMES
+from .person_select import NODE_CLASS_MAPPINGS as _PERSON_NODES
+from .person_select import NODE_DISPLAY_NAME_MAPPINGS as _PERSON_NAMES
 from .qwen_sparse_attention import NODE_CLASS_MAPPINGS as _SPARSE_NODES
 from .qwen_sparse_attention import NODE_DISPLAY_NAME_MAPPINGS as _SPARSE_NAMES
 from .random_prompt_selector import NODE_CLASS_MAPPINGS as _PROMPT_NODES
@@ -15,8 +17,8 @@ from .random_prompt_selector import NODE_DISPLAY_NAME_MAPPINGS as _PROMPT_NAMES
 from .resize_image_advanced import NODE_CLASS_MAPPINGS as _RESIZE_NODES
 from .resize_image_advanced import NODE_DISPLAY_NAME_MAPPINGS as _RESIZE_NAMES
 
-NODE_CLASS_MAPPINGS = {**_HEIC_NODES, **_BATCH_NODES, **_CROP_NODES, **_RESIZE_NODES, **_DESKIN_NODES, **_COMPILER_NODES, **_PROMPT_NODES, **_SPARSE_NODES}
-NODE_DISPLAY_NAME_MAPPINGS = {**_HEIC_NAMES, **_BATCH_NAMES, **_CROP_NAMES, **_RESIZE_NAMES, **_DESKIN_NAMES, **_COMPILER_NAMES, **_PROMPT_NAMES, **_SPARSE_NAMES}
+NODE_CLASS_MAPPINGS = {**_HEIC_NODES, **_BATCH_NODES, **_CROP_NODES, **_RESIZE_NODES, **_DESKIN_NODES, **_COMPILER_NODES, **_PROMPT_NODES, **_SPARSE_NODES, **_PERSON_NODES}
+NODE_DISPLAY_NAME_MAPPINGS = {**_HEIC_NAMES, **_BATCH_NAMES, **_CROP_NAMES, **_RESIZE_NAMES, **_DESKIN_NAMES, **_COMPILER_NAMES, **_PROMPT_NAMES, **_SPARSE_NAMES, **_PERSON_NAMES}
 
 # Sidebar tab backend (no node class): directory listing, thumbnails and import routes.
 try:
