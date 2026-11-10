@@ -5,7 +5,7 @@ import { api } from "../../scripts/api.js";
 // picking) images adds them to the list, the `image` combo always shows the first
 // one, and every queued run moves on to the next image. The last image stays
 // selected (count 1) until more are added, which then replace it.
-const NODE_NAME = "LoadImageBatchHEIC";
+export const NODE_NAME = "LoadImageBatchHEIC";
 const IMAGE_RE = /\.(png|jpe?g|webp|bmp|gif|tiff?|jfif|heic|heif)$/i;
 const ACCEPT = "image/*,.heic,.heif,image/heic,image/heif";
 
@@ -52,7 +52,8 @@ function showHead(node) {
   updateStatus(node);
 }
 
-function addImages(node, paths) {
+// Also used by the RulZ Image Browser sidebar tab (image_browser.js).
+export function addImages(node, paths) {
   if (!paths.length) return;
   const s = state(node);
   // Once the last image has been queued it is spent: new images replace it.
