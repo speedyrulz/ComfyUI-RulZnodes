@@ -20,6 +20,7 @@
 |---|---|
 | [**RulZ Load Image (HEIC)**](#rulz-load-image-heic) | `LoadImage` replacement that also loads `.heic` / `.heif` and outputs the filename. |
 | [**RulZ Load Image Batch (HEIC)**](#rulz-load-image-batch-heic) | The HEIC loader with a list: drop several photos on it and each queued run uses the next one. |
+| [**RulZ Image Browser**](#rulz-image-browser) | Sidebar tab, not a graph node: browse a folder as thumbnails, select images and send them to RulZ Load Image Batch (HEIC). |
 | [**RulZ Simple Load Image Batch**](#rulz-simple-load-image-batch) | Walks through every image in a folder, one image per queued run, and resumes where it stopped. |
 | [**RulZ Mask Intelligent Crop**](#rulz-mask-intelligent-crop) | Crops an image and/or mask to the mask's bounding box plus padding, with an aspect limit and divisible-by snapping. |
 | [**RulZ Resize Image Advanced**](#rulz-resize-image-advanced) | KJNodes-style Resize Image v2 with input-size passthrough, upscale-by and total-megapixel targets, and the output resolution shown on the node. |
@@ -82,6 +83,26 @@ handles the usual formats only.
   image. On the last image it stays put and the count stays at 1. Images added after that replace it.
 - Picking a file from the `image` dropdown also adds it to the list. **clear list** empties the list.
 - The list is saved with the workflow (in the node's properties), so it survives a reload.
+
+## RulZ Image Browser
+
+A tab in ComfyUI's left sidebar (the **RulZ Images** button) rather than a node in the node menu. It fills
+**RulZ Load Image Batch (HEIC)** from a folder without dragging files in from a file manager.
+
+- Type or paste a folder path and press Enter, or move around with the folder list and **Up**. Above a drive
+  root, **Up** lists the drives. The last folder is remembered.
+- The folder's images are shown as one column of thumbnails, by name or newest first. HEIC / HEIF files are
+  included.
+- Click a thumbnail to select or deselect it; Shift-click selects the range from the last clicked one.
+  **All** and **None** select or clear the whole folder. The counter at the bottom shows how many are selected.
+- **Load N into batch node** copies the selected images into ComfyUI's input folder and adds them to the
+  batch node's list in the order shown, the same as dropping them on the node. A file that is already in the
+  input folder with the same content is reused instead of copied again.
+- The images go to the selected RulZ Load Image Batch (HEIC) node, or the first one in the workflow if none
+  is selected. If the workflow has none, one is added.
+- The folder is read on the machine that runs ComfyUI, so with a remote ComfyUI it browses that machine. Any
+  browser that can reach your ComfyUI can list folders and view image thumbnails through this tab's routes;
+  keep that in mind if you start ComfyUI with `--listen`.
 
 ## RulZ Simple Load Image Batch
 
