@@ -94,8 +94,9 @@ A tab in ComfyUI's left sidebar (the **RulZ Images** button) rather than a node 
 - The folder's images are shown as one column of thumbnails, by name or newest first. HEIC / HEIF files are
   included.
 - Click a thumbnail to select or deselect it; Shift-click selects the range from the last clicked one.
-  **All** and **None** select or clear the whole folder. The counter at the bottom shows how many are selected.
-- **Load N into batch node** copies the selected images into ComfyUI's input folder and adds them to the
+  **All** and **None** select or clear the whole folder. The counter to the right of the thumbnails shows how
+  many are selected; it and the **Load** button stay in view while you scroll.
+- **Load** copies the selected images into ComfyUI's input folder and adds them to the
   batch node's list in the order shown, the same as dropping them on the node. A file that is already in the
   input folder with the same content is reused instead of copied again.
 - The images go to the selected RulZ Load Image Batch (HEIC) node, or the first one in the workflow if none

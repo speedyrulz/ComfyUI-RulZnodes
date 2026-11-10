@@ -37,8 +37,13 @@ const CSS = `
 .rulz-ib-info { color: var(--descrip-text, #999); font-size: 12px; flex: 1; min-width: 0;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .rulz-ib-error { color: #ff6b6b; white-space: normal; }
-.rulz-ib-list { flex: 1; min-height: 0; overflow-y: auto; padding: 8px; display: flex;
+.rulz-ib-body { flex: 1; min-height: 0; display: flex; align-items: stretch; }
+.rulz-ib-list { flex: 1; min-width: 0; min-height: 0; overflow-y: auto; padding: 8px; display: flex;
   flex-direction: column; gap: 8px; }
+/* Beside the thumbnails and sticky, so it is in reach wherever the column is
+   scrolled to, whether the list or the whole sidebar panel is what scrolls. */
+.rulz-ib-rail { flex: none; width: 72px; align-self: flex-start; position: sticky; top: 0; z-index: 1;
+  padding: 8px 6px 8px 0; display: flex; flex-direction: column; gap: 6px; text-align: center; }
 .rulz-ib-item { position: relative; flex: none; border: 2px solid transparent; border-radius: 6px;
   overflow: hidden; cursor: pointer; background: var(--comfy-input-bg, #222); user-select: none; }
 .rulz-ib-item:hover { border-color: var(--border-color, #666); }
@@ -53,10 +58,10 @@ const CSS = `
   display: none; align-items: center; justify-content: center; font-size: 13px; font-weight: 700;
   background: var(--p-primary-color, #4a90e2); color: var(--p-primary-contrast-color, #fff); }
 .rulz-ib-item.selected .rulz-ib-check { display: flex; }
-.rulz-ib-foot { padding: 8px; display: flex; flex-direction: column; gap: 6px;
-  border-top: 1px solid var(--border-color, #444); }
-.rulz-ib-count { font-weight: 600; }
-.rulz-ib button.rulz-ib-load { padding: 7px 8px; font-size: 13px; font-weight: 600;
+.rulz-ib-count { padding: 6px 2px; border-radius: 6px; background: var(--comfy-input-bg, #222);
+  font-size: 11px; line-height: 1.3; color: var(--descrip-text, #999); }
+.rulz-ib-count b { display: block; font-size: 22px; line-height: 1.1; color: var(--fg-color, #ddd); }
+.rulz-ib button.rulz-ib-load { padding: 12px 2px; font-size: 13px; font-weight: 600; white-space: normal;
   background: var(--p-primary-color, #4a90e2); color: var(--p-primary-contrast-color, #fff);
   border-color: transparent; }
 `;
@@ -130,15 +135,17 @@ const root = h(
     dirList,
     h("div", { className: "rulz-ib-row" }, info, sortSelect, allButton, noneButton)
   ),
-  list,
-  h("div", { className: "rulz-ib-foot" }, count, loadButton)
+  h("div", { className: "rulz-ib-body" }, list, h("div", { className: "rulz-ib-rail" }, count, loadButton))
 );
 sortSelect.value = sort;
 
 function updateCount() {
   const n = selected.size;
-  count.textContent = `${n} image${n === 1 ? "" : "s"} selected`;
-  loadButton.textContent = busy ? "Loading..." : n ? `Load ${n} into batch node` : "Load into batch node";
+  const label = `${n} image${n === 1 ? "" : "s"} selected`;
+  count.replaceChildren(h("b", {}, String(n)), "selected");
+  count.title = label;
+  loadButton.textContent = busy ? "Loading..." : "Load";
+  loadButton.title = n ? `Load the ${label} into RulZ Load Image Batch (HEIC)` : "Select images first";
   loadButton.disabled = busy || n === 0;
   noneButton.disabled = n === 0;
   allButton.disabled = images.length === 0 || n === images.length;
