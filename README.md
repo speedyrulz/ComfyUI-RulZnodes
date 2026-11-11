@@ -295,8 +295,11 @@ you clicked).
   ComfyUI does not count that memory, so if your workflows also use that GPU (multi-GPU nodes, for example)
   they share its VRAM. Switching `device` back to `default` frees it.
 - The SAM 3 text encoder runs on the CPU, once per prompt.
-- GPUs are listed with their names because CUDA's numbering can differ from `nvidia-smi`'s.
-- Picking the main GPU by name is the same as `default`.
+- GPUs are listed by name, not number, because the numbering changes with launch flags such as
+  `--default-device`. A saved workflow keeps pointing at the same card. Two identical cards are told apart by
+  their PCI bus.
+- Picking the main GPU by name is the same as `default`. If the saved GPU is not available (for example
+  hidden by `--cuda-device`), the node uses the main GPU instead of failing.
 - Cancelling the running workflow still works while a preview runs on the other GPU.
 
 ## RulZ Qwen Sparse Sage Attention

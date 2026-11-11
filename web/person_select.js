@@ -400,6 +400,17 @@ function setup(node) {
   node._rulzPersonSelectReload();
 }
 
+// GPU numbers change with ComfyUI's launch flags, so the list names GPUs only.
+// Map a value saved as "cuda:1 - NVIDIA GeForce RTX 4060 Ti" (1.9.x) to the
+// entry with that name, or to "default" when that GPU is not available now.
+function fixDeviceValue(node) {
+  const w = node.widgets?.find((x) => x.name === "device");
+  const values = w?.options?.values;
+  if (!w || !Array.isArray(values) || values.includes(w.value)) return;
+  const name = String(w.value ?? "").replace(/^cuda:\d+\s*-\s*/, "");
+  w.value = values.includes(name) ? name : "default";
+}
+
 app.registerExtension({
   name: "RulZnodes.personSelect",
   async beforeRegisterNodeDef(nodeType, nodeData) {
@@ -415,6 +426,7 @@ app.registerExtension({
     const onConfigure = nodeType.prototype.onConfigure;
     nodeType.prototype.onConfigure = function () {
       const r = onConfigure?.apply(this, arguments);
+      fixDeviceValue(this);
       this._rulzPersonSelectReload?.();
       return r;
     };
