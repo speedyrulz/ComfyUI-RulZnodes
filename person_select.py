@@ -6,12 +6,13 @@ clicked points; the mask under each point is the selection. A click that lands o
 nothing SAM detected falls back to a SAM point prompt at that spot.
 
 The preview route and the node share `_resolve`, so what is shown on the node is
-what the node outputs. SAM 3 runs through ComfyUI's own SAM 3 model code:
+what the node outputs. SAM 3 runs through ComfyUI's own SAM 3 model code, on
+the node's own copy of the model, outside ComfyUI's model management:
 
-- On the `default` device the model goes through ComfyUI's model management like
-  any other model, and the preview waits while a workflow is running.
-- On another GPU the node keeps its own copy of the model there, outside model
-  management, so the preview can run while a workflow is using the main GPU.
+- On the `default` device the copy waits in RAM and moves to the main GPU only
+  while it runs. The preview waits while a workflow is running.
+- On another GPU the copy stays there, so the preview can run while a workflow
+  is using the main GPU.
 """
 import asyncio
 import base64
@@ -112,8 +113,8 @@ def _normalize(device):
 
 
 def _target_device(value):
-    """`device` widget value -> the device for a separate copy of the model, or
-    None to use ComfyUI's main device through its model management."""
+    """`device` widget value -> the GPU to keep the model on, or None for
+    ComfyUI's main GPU (used only while running)."""
     if not value or value == DEFAULT_DEVICE:
         return None
     try:
@@ -127,72 +128,88 @@ def _target_device(value):
     return device
 
 
+def _main_device():
+    return _normalize(comfy.model_management.get_torch_device())
+
+
+def _empty_cache():
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
 def _get_model(name, device):
-    key = (name, None if device is None else str(device))
-    handle = _models.get(key)
-    if handle is not None:
-        return handle
+    """The node's own copy of SAM 3, set to run on `device` (None = main GPU).
 
-    # One checkpoint per kind at a time. A separate copy is not known to
-    # ComfyUI, so the old one is dropped here to give its memory back.
-    for k in [k for k in _models if (k[1] is None) == (device is None)]:
-        del _models[k]
-    _text_cache.clear()
-    if device is not None:
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-
-    path = folder_paths.get_full_path_or_raise("checkpoints", name)
-    options = {}
-    if device is not None:
-        options = {
-            "model_options": {"load_device": device, "offload_device": device},
+    ComfyUI's model management is never used. Its model list is changed by the
+    workflow thread (it unloads everything after some workflows), and loading
+    into it from the preview thread at that moment breaks it for every later
+    load until ComfyUI restarts."""
+    handle = _models.get(name)
+    if handle is None:
+        # One checkpoint at a time; drop the old one to give its memory back.
+        _models.clear()
+        _text_cache.clear()
+        _empty_cache()
+        path = folder_paths.get_full_path_or_raise("checkpoints", name)
+        out = comfy.sd.load_checkpoint_guess_config(
+            path,
+            output_vae=False,
+            output_clip=True,
+            embedding_directory=folder_paths.get_folder_paths("embeddings"),
+            # load_device picks the GPU dtype; the weights stay on the CPU until used.
+            model_options={"load_device": _main_device(), "offload_device": _CPU},
             # The text encoder only runs once per prompt; keep it off every GPU.
-            "te_model_options": {"load_device": _CPU, "offload_device": _CPU},
-        }
-    out = comfy.sd.load_checkpoint_guess_config(
-        path,
-        output_vae=False,
-        output_clip=True,
-        embedding_directory=folder_paths.get_folder_paths("embeddings"),
-        **options,
-    )
-    model, clip = out[0], out[1]
-    sam = model.model.diffusion_model
-    if clip is None or not hasattr(sam, "forward_segment"):
-        raise ValueError(f"'{name}' is not a SAM 3 checkpoint")
-    if device is not None:
-        sam.to(device)
-    handle = {"key": key, "model": model, "clip": clip, "sam": sam, "device": device, "dtype": model.model.get_dtype()}
-    _models[key] = handle
+            te_model_options={"load_device": _CPU, "offload_device": _CPU},
+        )
+        model, clip = out[0], out[1]
+        sam = model.model.diffusion_model
+        if clip is None or not hasattr(sam, "forward_segment"):
+            raise ValueError(f"'{name}' is not a SAM 3 checkpoint")
+        sam.to(_CPU)
+        handle = {"key": name, "clip": clip, "sam": sam, "dtype": model.model.get_dtype(), "at": _CPU}
+        _models[name] = handle
+    handle["target"] = device
     return handle
 
 
 def _prepare(handle):
-    """Device and dtype to run on, after making sure the weights are there."""
-    if handle["device"] is None:
-        comfy.model_management.load_model_gpu(handle["model"])
-        return comfy.model_management.get_torch_device(), handle["dtype"]
-    return handle["device"], handle["dtype"]
+    """Device and dtype to run on, after moving the weights there."""
+    device = handle["target"] or _main_device()
+    if handle["at"] != device:
+        if handle["target"] is None and not getattr(_tls, "preview", False):
+            # On the workflow thread it is safe to ask ComfyUI to make room.
+            comfy.model_management.free_memory(3 * 1024**3, device)
+        try:
+            handle["sam"].to(device)
+        except torch.cuda.OutOfMemoryError:
+            _park(handle)
+            raise
+        handle["at"] = device
+    return device, handle["dtype"]
+
+
+def _park(handle):
+    """Move the copy off the main GPU so it never holds VRAM a workflow needs."""
+    if handle["at"] != _CPU:
+        handle["sam"].to(_CPU)
+        handle["at"] = _CPU
+        _empty_cache()
 
 
 def _encode(handle, text):
     key = (handle["key"], text)
     cond = _text_cache.get(key)
     if cond is None:
+        # Run the CPU text encoder directly so model management never sees it.
         clip = handle["clip"]
-        if handle["device"] is None:
-            cond = clip.encode_from_tokens_scheduled(clip.tokenize(text))
-        else:
-            # Run the CPU text encoder directly so model management never sees it.
-            encoder = clip.cond_stage_model
-            encoder.reset_clip_options()
-            encoder.set_clip_options({"execution_device": _CPU})
-            out = encoder.encode_token_weights(clip.tokenize(text))
-            extra = dict(out[2]) if len(out) > 2 else {}
-            extra["pooled_output"] = out[1]
-            cond = [[out[0], extra]]
+        encoder = clip.cond_stage_model
+        encoder.reset_clip_options()
+        encoder.set_clip_options({"execution_device": _CPU})
+        out = encoder.encode_token_weights(clip.tokenize(text))
+        extra = dict(out[2]) if len(out) > 2 else {}
+        extra["pooled_output"] = out[1]
+        cond = [[out[0], extra]]
         if len(_text_cache) >= _TEXT_CACHE_MAX:
             _text_cache.clear()
         _text_cache[key] = cond
@@ -309,11 +326,27 @@ def _resolve(image_name, model_name, device, prompt, max_detections, threshold, 
     ones), the number detected, the selected indices and each point's index (-1
     for a point that selects nothing). The model is only loaded when something
     is not cached yet."""
+    run_on = device or _main_device()
+    # The current CUDA device is per thread, so switching it here does not
+    # affect a running workflow.
+    on_device = torch.cuda.device(run_on) if run_on.type == "cuda" else contextlib.nullcontext()
+    try:
+        with on_device:
+            return _resolve_on(image_name, model_name, device, prompt, max_detections, threshold, points)
+    except torch.cuda.OutOfMemoryError:
+        raise RuntimeError(
+            f"Not enough free VRAM on {run_on} for SAM 3. Set device to another GPU, or wait until the workflow "
+            "using it has finished."
+        )
+    finally:
+        handle = _models.get(model_name)
+        if device is None and handle is not None:
+            _park(handle)  # the main GPU belongs to the workflows
+
+
+def _resolve_on(image_name, model_name, device, prompt, max_detections, threshold, points):
     get_handle = lambda: _get_model(model_name, device)  # noqa: E731
-    # ComfyUI's memory code works on the thread's current CUDA device, which is
-    # per thread, so switching it here does not affect a running workflow.
-    on_device = torch.cuda.device(device) if device is not None and device.type == "cuda" else contextlib.nullcontext()
-    with torch.no_grad(), on_device:
+    with torch.no_grad():
         entry = _detect(image_name, get_handle, model_name, prompt, max_detections, threshold)
         detected = entry["masks"]
         n, H, W = detected.shape
