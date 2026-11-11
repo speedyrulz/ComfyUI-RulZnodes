@@ -269,6 +269,7 @@ checkpoint in `models/checkpoints`. Nothing else is installed or downloaded.
 | `prompt` | What SAM 3 looks for. Default `person`. Separate several things with commas, e.g. `person, dog`. |
 | `max_detections` | Most matches to find per prompt. |
 | `threshold` | Detection confidence. Lower it if someone is not found. |
+| `device` | Where SAM 3 runs. `default` is ComfyUI's main GPU. Pick another GPU (listed by name) to click and queue images while a workflow is using the main GPU. |
 
 **Outputs:** `image`, `mask` (what you clicked), `others_mask` (everything else that was detected, minus what
 you clicked).
@@ -278,8 +279,21 @@ you clicked).
 - Clicking something that was not detected asks SAM 3 for whatever is at that point and selects that.
 - The selection is saved with the workflow as click positions, so it is cleared when you change the image.
 - The preview runs SAM 3 when the image or a setting changes: a few seconds the first time while the model
-  loads, about a second per new image after that. It waits while a workflow is running.
+  loads, about a second per new image after that. On `default` it waits while a workflow is running.
 - Queuing with nothing selected stops the workflow with an error, so an empty mask is never passed on.
+
+**Using a second GPU (`device`):**
+
+- The preview runs right away even while a workflow is running, so you can pick the person in the next image
+  and queue it without waiting. The queued run itself still waits its turn, because ComfyUI runs one workflow
+  at a time.
+- The node keeps its own copy of SAM 3 on that GPU (about 1.3 GB of VRAM, plus about 1 GB while it runs), outside ComfyUI's
+  model management. ComfyUI does not count that memory, so if your workflows also use that GPU (multi-GPU
+  nodes, for example) they share its VRAM. Switching `device` back to `default` frees it.
+- The SAM 3 text encoder runs on the CPU for this, once per prompt.
+- GPUs are listed with their names because CUDA's numbering can differ from `nvidia-smi`'s.
+- Picking the main GPU by name is the same as `default`.
+- Cancelling the running workflow still works while a preview runs on the other GPU.
 
 ## RulZ Qwen Sparse Sage Attention
 
