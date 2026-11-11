@@ -9,7 +9,7 @@ import { api } from "../../scripts/api.js";
 
 const NODE_NAME = "RulZPersonSelect";
 const ROUTE = "/rulz/person_select/detect";
-const DETECT_WIDGETS = ["sam3_model", "prompt", "max_detections", "threshold"];
+const DETECT_WIDGETS = ["sam3_model", "prompt", "max_detections", "threshold", "device"];
 const MIN_HEIGHT = 220;
 const MAX_AUTO_HEIGHT = 560;
 const TOOLBAR_HEIGHT = 30;
@@ -201,7 +201,7 @@ function setup(node) {
     state.waiting = false;
     setStatus(state.map ? "Updating..." : "Finding people (first run loads SAM 3)...");
     const body = { image, sam3_model: model, points: getPoints() };
-    for (const name of ["prompt", "max_detections", "threshold"]) body[name] = widget(name)?.value;
+    for (const name of ["prompt", "max_detections", "threshold", "device"]) body[name] = widget(name)?.value;
     try {
       const resp = await api.fetchApi(ROUTE, {
         method: "POST",
@@ -212,7 +212,7 @@ function setup(node) {
       if (seq !== state.seq) return;
       if (resp.status === 409) {
         state.waiting = true;
-        setStatus("Waiting for the running workflow to finish...");
+        setStatus("Waiting for the running workflow. Set device to another GPU to preview now.");
         return;
       }
       if (!resp.ok) throw new Error(data?.error ?? `${resp.status} ${resp.statusText}`);
