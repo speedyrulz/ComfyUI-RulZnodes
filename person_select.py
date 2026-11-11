@@ -92,18 +92,33 @@ def _list_models():
     return sorted(names, key=lambda n: ("sam" not in n.lower(), n.lower()))
 
 
-def _device_options():
-    options = [DEFAULT_DEVICE]
+def _gpus():
+    """{label: torch device} for the GPUs ComfyUI can see.
+
+    Labels are GPU names, not numbers: CUDA's numbering changes with launch
+    flags such as --default-device and --cuda-device, and a saved workflow must
+    keep pointing at the same card. Identical cards are told apart by their PCI
+    bus, which does not change."""
+    found = []
     try:
         for dev in comfy.model_management.get_all_torch_devices():
             if dev.type == "cuda":
-                options.append(f"cuda:{dev.index} - {torch.cuda.get_device_name(dev.index)}")
+                props = torch.cuda.get_device_properties(dev.index)
+                found.append((props.name, getattr(props, "pci_bus_id", dev.index), _normalize(dev)))
             elif dev.type != "cpu":
-                options.append(str(dev))
+                found.append((str(dev), 0, _normalize(dev)))
     except Exception as e:
         print(f"[RulZ Person Select] could not list GPUs: {e}")
+    names = [name for name, _, _ in found]
+    gpus = {}
+    for name, bus, dev in sorted(found, key=lambda f: (f[0], f[1])):
+        gpus[f"{name} (PCI bus {bus})" if names.count(name) > 1 else name] = dev
+    return gpus
+
+
+def _device_options():
     # No CPU entry: SAM 3 takes minutes per image there.
-    return options
+    return [DEFAULT_DEVICE] + list(_gpus())
 
 
 def _normalize(device):
@@ -114,17 +129,21 @@ def _normalize(device):
 
 def _target_device(value):
     """`device` widget value -> the GPU to keep the model on, or None for
-    ComfyUI's main GPU (used only while running)."""
+    ComfyUI's main GPU (used only while running).
+
+    Also takes values saved by 1.9.0/1.9.1 ("cuda:1 - NVIDIA GeForce RTX 4060
+    Ti"), by the GPU's name. A GPU that is not available now (hidden by a
+    launch flag, or another machine) falls back to the main GPU."""
+    value = str(value or "").strip()
     if not value or value == DEFAULT_DEVICE:
         return None
-    try:
-        device = _normalize(torch.device(str(value).split(" ", 1)[0]))
-    except (RuntimeError, ValueError):
-        raise ValueError(f"Unknown device: {value}")
-    if device == _normalize(comfy.model_management.get_torch_device()):
+    label = re.sub(r"^cuda:\d+\s*-\s*", "", value)
+    device = _gpus().get(label)
+    if device is None:
+        print(f"[RulZ Person Select] GPU '{value}' is not available; using ComfyUI's main GPU.")
+        return None
+    if device == _main_device():
         return None  # the main GPU picked by name: same as default
-    if device.type == "cuda" and device.index >= torch.cuda.device_count():
-        raise ValueError(f"{device} is not available on this machine")
     return device
 
 
@@ -529,7 +548,10 @@ class RulZPersonSelect:
         return LoadImageWithFilenameHEIC.IS_CHANGED(image)
 
     @classmethod
-    def VALIDATE_INPUTS(cls, image):
+    def VALIDATE_INPUTS(cls, image, device=DEFAULT_DEVICE):
+        # Taking `device` here skips ComfyUI's "Value not in list" check for it:
+        # a saved GPU that is now numbered differently, or missing, is resolved
+        # by name or falls back to the main GPU in _target_device.
         if not folder_paths.exists_annotated_filepath(image):
             return f"Invalid image file: {image}"
         return True
