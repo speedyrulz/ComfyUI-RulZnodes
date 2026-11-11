@@ -279,7 +279,11 @@ you clicked).
 - Clicking something that was not detected asks SAM 3 for whatever is at that point and selects that.
 - The selection is saved with the workflow as click positions, so it is cleared when you change the image.
 - The preview runs SAM 3 when the image or a setting changes: a few seconds the first time while the model
-  loads, about a second per new image after that. On `default` it waits while a workflow is running.
+  loads, then about 3 seconds per new image on `default` and about a second on a second GPU. On `default` it
+  waits while a workflow is running.
+- SAM 3 runs on the node's own copy of the model, outside ComfyUI's model management. On `default` that copy
+  waits in RAM (about 1.7 GB) and is moved to the main GPU only while it runs, so it never holds VRAM your
+  workflows need.
 - Queuing with nothing selected stops the workflow with an error, so an empty mask is never passed on.
 
 **Using a second GPU (`device`):**
@@ -287,10 +291,10 @@ you clicked).
 - The preview runs right away even while a workflow is running, so you can pick the person in the next image
   and queue it without waiting. The queued run itself still waits its turn, because ComfyUI runs one workflow
   at a time.
-- The node keeps its own copy of SAM 3 on that GPU (about 1.3 GB of VRAM, plus about 1 GB while it runs), outside ComfyUI's
-  model management. ComfyUI does not count that memory, so if your workflows also use that GPU (multi-GPU
-  nodes, for example) they share its VRAM. Switching `device` back to `default` frees it.
-- The SAM 3 text encoder runs on the CPU for this, once per prompt.
+- The node's copy of SAM 3 stays on that GPU (about 1.3 GB of VRAM, plus about 1 GB while it runs).
+  ComfyUI does not count that memory, so if your workflows also use that GPU (multi-GPU nodes, for example)
+  they share its VRAM. Switching `device` back to `default` frees it.
+- The SAM 3 text encoder runs on the CPU, once per prompt.
 - GPUs are listed with their names because CUDA's numbering can differ from `nvidia-smi`'s.
 - Picking the main GPU by name is the same as `default`.
 - Cancelling the running workflow still works while a preview runs on the other GPU.
