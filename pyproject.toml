@@ -1,7 +1,7 @@
 [project]
 name = "comfyui-rulznodes"
 description = "RulZ nodes for ComfyUI: Load Image with HEIC/HEIF support and a filename output, a resumable one-image-per-run batch loader, an Image Browser sidebar tab that sends selected images from any folder to the batch loader, Mask Intelligent Crop, an advanced Resize Image with megapixel and input-size targets, DeskinTexture to remove honeycomb skin texture, a per-workflow Disable Comfy Compiler model patch, a seeded Random Prompt Selector that picks a line from a text file, a click-to-mask Person Select built on SAM 3, and block-sparse SageAttention for Qwen Image 2.1."
-version = "1.9.2"
+version = "1.9.3"
 license = { file = "LICENSE" }
 classifiers = ["License :: OSI Approved :: GNU General Public License v3 (GPLv3)"]
 dependencies = ["pillow-heif"]

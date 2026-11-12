@@ -350,7 +350,10 @@ def _resolve(image_name, model_name, device, prompt, max_detections, threshold, 
     # affect a running workflow.
     on_device = torch.cuda.device(run_on) if run_on.type == "cuda" else contextlib.nullcontext()
     try:
-        with on_device:
+        # Workflows run under torch.inference_mode, and weights or masks made
+        # there cannot be moved or changed outside it later, so the preview
+        # runs in it too.
+        with torch.inference_mode(), on_device:
             return _resolve_on(image_name, model_name, device, prompt, max_detections, threshold, points)
     except torch.cuda.OutOfMemoryError:
         raise RuntimeError(
@@ -360,7 +363,8 @@ def _resolve(image_name, model_name, device, prompt, max_detections, threshold, 
     finally:
         handle = _models.get(model_name)
         if device is None and handle is not None:
-            _park(handle)  # the main GPU belongs to the workflows
+            with torch.inference_mode():
+                _park(handle)  # the main GPU belongs to the workflows
 
 
 def _resolve_on(image_name, model_name, device, prompt, max_detections, threshold, points):
@@ -444,7 +448,7 @@ def _parse_points(raw):
 
 
 def _preview(body, device):
-    with _lock:
+    with _lock, torch.inference_mode():
         _tls.preview = True
         try:
             result = _resolve(
