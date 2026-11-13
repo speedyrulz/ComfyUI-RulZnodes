@@ -13,11 +13,17 @@ the node's own copy of the model, outside ComfyUI's model management:
   while it runs. The preview waits while a workflow is running.
 - On another GPU the copy stays there, so the preview can run while a workflow
   is using the main GPU.
+
+What SAM 3 finds is kept per image (_CachedImage): every candidate of each
+prompt before the threshold is applied, and each mask once it is refined. A
+threshold or max_detections change only refines masks not needed before, and a
+preview stops early once the same node has sent a newer one.
 """
 import asyncio
 import base64
 import contextlib
 import gc
+import hashlib
 import io
 import json
 import os
@@ -44,9 +50,12 @@ DEFAULT_DEVICE = "default"
 LABEL_MAX_SIDE = 1024  # longest side of the label map sent to the frontend
 LABEL_MAX = 0xFFFF  # label map pixels are 16 bit (red = low byte, green = high byte)
 REFINE_ITERATIONS = 2  # SAM decoder passes per mask, as SAM3 Detect's default
-_DET_CACHE_MAX = 2  # each entry holds full-resolution masks for one image
-_EXTRA_CACHE_MAX = 16
+_CACHE_MAX_BYTES = 1024**3  # all cached images together; the newest one is always kept
+_DETS_PER_IMAGE = 8  # prompts whose candidates are kept per image
+_EXTRA_CACHE_MAX = 16  # point-prompt masks kept per image
 _TEXT_CACHE_MAX = 32
+_TEXT_KEYS_MAX = 256
+_CLIENTS_MAX = 256  # preview nodes whose newest request number is remembered
 _CPU = torch.device("cpu")
 
 _SAM3_KEY = "detector.backbone.vision_backbone.trunk.blocks.0.attn.qkv.weight"  # as ComfyUI detects SAM 3
@@ -55,18 +64,72 @@ _lock = threading.Lock()  # one SAM inference at a time (preview route and node)
 _models = {}  # checkpoint name -> loaded model handle
 _not_sam = {}  # checkpoint path -> mtime, for files found not to be SAM 3
 _text_cache = {}  # (model key, prompt text) -> conditioning
-_det_cache = OrderedDict()
-_tls = threading.local()  # .preview is True while a preview request runs
+_text_keys = OrderedDict()  # (model name, prompt text) -> [(prompt key, max detections)]
+_images = OrderedDict()  # (image path, mtime) -> _CachedImage
+_latest = OrderedDict()  # preview client id -> newest request number
+_latest_lock = threading.Lock()
+# .preview is True while a preview request runs; .request is its
+# (client id, request number, runs on the main GPU), None for the node itself.
+_tls = threading.local()
 
 routes = PromptServer.instance.routes
 
 
 class _Busy(Exception):
-    """A workflow started while a preview for the main GPU was waiting its turn."""
+    """A workflow started while a preview for the main GPU was waiting its turn or running."""
+
+
+class _Stale(Exception):
+    """The same node has sent a newer preview request, so this one's answer would be ignored."""
 
 
 def _workflow_running():
     return bool(PromptServer.instance.prompt_queue.currently_running)
+
+
+def _request_id(body):
+    """(client id, request number) of a preview request, or (None, 0) when the
+    frontend sent none (a page loaded before 1.9.5)."""
+    client = body.get("client")
+    try:
+        number = int(body.get("seq"))
+    except (TypeError, ValueError):
+        return None, 0
+    if not isinstance(client, str) or not 0 < len(client) <= 64:
+        return None, 0
+    return client, number
+
+
+def _register_request(client, number):
+    """Note a preview request. False when the same node already sent a newer one."""
+    if client is None:
+        return True
+    with _latest_lock:
+        newest = _latest.get(client)
+        if newest is not None and newest > number:
+            return False
+        _latest[client] = number
+        _latest.move_to_end(client)
+        while len(_latest) > _CLIENTS_MAX:
+            _latest.popitem(last=False)
+    return True
+
+
+def _checkpoint():
+    """Called before each SAM 3 pass of a preview. Stops it when the same node has
+    sent a newer request (dragging the threshold, quick clicks), or when it uses
+    the main GPU and a workflow has started. What it found so far stays cached for
+    the next preview or the node's run. Does nothing for the node itself."""
+    request = getattr(_tls, "request", None)
+    if request is None:
+        return
+    client, number, main_gpu = request
+    if client is not None:
+        with _latest_lock:
+            if _latest.get(client, number) > number:
+                raise _Stale()
+    if main_gpu and _workflow_running():
+        raise _Busy()
 
 
 def _install_interrupt_guard():
@@ -324,58 +387,6 @@ def _encode(handle, text):
     return cond
 
 
-def _sam_frame(image, device, dtype):
-    frame = comfy.utils.common_upscale(image[..., :3].movedim(-1, 1), 1008, 1008, "bilinear", crop="disabled")
-    return frame.to(device=device, dtype=dtype)
-
-
-def _detect_masks(handle, image, conditioning, threshold):
-    """SAM3 Detect's text-prompt path for one image -> bool masks [N, H, W] on the CPU.
-
-    SAM3 Detect passes orig_size, which makes the detector enlarge the masks of
-    all 200 candidates to the image size before any is filtered out: several GB
-    of VRAM for a phone photo. Here only the kept masks are enlarged, the same
-    way (bilinear works on each mask separately), so the result is unchanged."""
-    extract_text_prompts, refine_mask = _sam3_helpers()
-    device, dtype = _prepare(handle)
-    sam = handle["sam"]
-    _, H, W, _ = image.shape
-    frame = _sam_frame(image, device, dtype)
-    masks = []
-    for embeddings, text_mask, max_det in extract_text_prompts(conditioning, device, dtype):
-        out = sam(frame, text_embeddings=embeddings, text_mask=text_mask, boxes=None, threshold=threshold, orig_size=None)
-        probs = out["scores"][0].sigmoid()
-        keep = probs > threshold
-        boxes = out["boxes"][0][keep]  # 0..1, scaled to pixels as the detector does
-        boxes = boxes * torch.tensor([W, H, W, H], device=boxes.device, dtype=boxes.dtype)
-        boxes, probs, coarse = boxes.cpu(), probs[keep].cpu(), out["masks"][0][keep]
-        del out
-        order = probs.argsort(descending=True)[:max_det]
-        for i in order.tolist():
-            full = F.interpolate(coarse[i][None, None], size=(H, W), mode="bilinear", align_corners=False)[0, 0]
-            mask = refine_mask(sam, image[0], full, boxes[i], H, W, device, dtype, REFINE_ITERATIONS)
-            masks.append(mask[0].cpu() > 0.5)
-    if not masks:
-        return torch.zeros((0, H, W), dtype=torch.bool)
-    return torch.stack(masks)
-
-
-def _point_segment(handle, image, px, py):
-    """SAM3 Detect's point-prompt path for one positive point -> bool mask [H, W]."""
-    device, dtype = _prepare(handle)
-    sam = handle["sam"]
-    _, H, W, _ = image.shape
-    frame = _sam_frame(image, device, dtype)
-    points = {
-        "point_coords": torch.tensor([[[px / W * 1008, py / H * 1008]]], dtype=dtype, device=device),
-        "point_labels": torch.tensor([[1]], dtype=torch.int32, device=device),
-    }
-    logit = sam.forward_segment(frame, point_inputs=points)
-    for _ in range(REFINE_ITERATIONS - 1):
-        logit = sam.forward_segment(frame, mask_inputs=logit)
-    return F.interpolate(logit, size=(H, W), mode="bilinear", align_corners=False)[0, 0].cpu() > 0
-
-
 def _image_path(name):
     """Annotated image name -> absolute path inside ComfyUI's input/output/temp."""
     if not isinstance(name, str) or not name.strip():
@@ -398,55 +409,371 @@ def _prompt_text(prompt, max_detections):
     return ", ".join(p if re.search(r":\s*[\d.]+$", p) else f"{p}:{max_detections}" for p in parts)
 
 
-def _detect(image_name, get_handle, model_name, prompt, max_detections, threshold):
-    path = _image_path(image_name)
-    text = _prompt_text(prompt, max_detections)
-    # The device is not part of the key: every device finds the same people.
-    key = (path, os.path.getmtime(path), model_name, text, round(float(threshold), 3))
-    entry = _det_cache.get(key)
-    if entry is not None:
-        _det_cache.move_to_end(key)
-        return entry
-
-    image = LoadImageWithFilenameHEIC().load_image(image_name)[0][:1]
-    handle = get_handle()
-    masks = _detect_masks(handle, image, _encode(handle, text), threshold)
-    entry = {
-        "image": image,
-        "masks": masks,
-        "areas": masks.flatten(1).sum(1),
-        "extras": OrderedDict(),  # (px, py) -> point-prompt mask [H, W], or None
-        "labels": {},  # extra keys -> label map data URL
-    }
-    _det_cache[key] = entry
-    while len(_det_cache) > _DET_CACHE_MAX:
-        _det_cache.popitem(last=False)
-    return entry
+def _tensor_key(*tensors):
+    """A hash of the tensors' dtype, shape and contents."""
+    h = hashlib.blake2b(digest_size=16)
+    for t in tensors:
+        t = t.detach().to(_CPU).contiguous()
+        h.update(f"{t.dtype}{tuple(t.shape)}".encode())
+        h.update(t.flatten().view(torch.uint8).numpy().tobytes())
+    return h.hexdigest()
 
 
-def _point_mask(entry, get_handle, px, py):
-    """SAM point prompt for a click that no detected mask covers."""
-    extras = entry["extras"]
-    key = (px, py)
+def _prompt_keys(get_handle, model_name, text):
+    """[(key, max detections)] for each comma-separated part of the prompt, in order.
+
+    The key identifies the text embedding SAM 3 gets for that part. ":N" only sets
+    the maximum, so a part's candidates are found once for every max_detections.
+    Remembered per text, so a preview answered from the cache never loads the model."""
+    cache_key = (model_name, text)
+    keys = _text_keys.get(cache_key)
+    if keys is None:
+        extract_text_prompts, _ = _sam3_helpers()
+        cond = _encode(get_handle(), text)
+        keys = [
+            (_tensor_key(embeddings, mask), max_det)
+            for embeddings, mask, max_det in extract_text_prompts(cond, _CPU, torch.float32)
+        ]
+        _text_keys[cache_key] = keys
+        while len(_text_keys) > _TEXT_KEYS_MAX:
+            _text_keys.popitem(last=False)
+    _text_keys.move_to_end(cache_key)
+    return keys
+
+
+class _Crop:
+    """A bool mask [H, W] kept as its bounding box, 8 pixels to a byte.
+
+    Masks are cached between previews, and at full size each takes a byte per
+    pixel (48 MB for a 48 MP photo) though most of it is empty."""
+
+    __slots__ = ("y0", "x0", "h", "w", "bits", "area")
+
+    def __init__(self, mask):
+        self.area = int(mask.sum())
+        rows = mask.any(1).nonzero().flatten()
+        cols = mask.any(0).nonzero().flatten()
+        if not len(rows):
+            self.y0 = self.x0 = self.h = self.w = 0
+            self.bits = np.zeros((0, 0), dtype=np.uint8)
+            return
+        self.y0, self.x0 = int(rows[0]), int(cols[0])
+        self.h, self.w = int(rows[-1]) + 1 - self.y0, int(cols[-1]) + 1 - self.x0
+        box = mask[self.y0:self.y0 + self.h, self.x0:self.x0 + self.w]
+        self.bits = np.packbits(box.numpy(), axis=1)
+
+    @property
+    def nbytes(self):
+        return self.bits.nbytes + 64
+
+    def at(self, y, x):
+        y, x = y - self.y0, x - self.x0
+        if not (0 <= y < self.h and 0 <= x < self.w):
+            return False
+        return bool((self.bits[y, x >> 3] >> (7 - (x & 7))) & 1)
+
+    def _unpack(self, rows=slice(None)):
+        return np.unpackbits(self.bits[rows], axis=1, count=self.w).view(np.bool_)
+
+    def paste(self, out):
+        """out |= this mask, for a bool tensor [H, W]."""
+        if self.h:
+            out[self.y0:self.y0 + self.h, self.x0:self.x0 + self.w] |= torch.from_numpy(self._unpack())
+
+    def sample(self, rows, cols):
+        """The mask at the given rows and columns (int arrays) -> bool array."""
+        out = np.zeros((len(rows), len(cols)), dtype=np.bool_)
+        if self.h:
+            r = (rows >= self.y0) & (rows < self.y0 + self.h)
+            c = (cols >= self.x0) & (cols < self.x0 + self.w)
+            if r.any() and c.any():
+                out[np.ix_(r, c)] = self._unpack(rows[r] - self.y0)[:, cols[c] - self.x0]
+        return out
+
+
+class _Candidates:
+    """SAM 3's detector output for one prompt part: all of its candidates (200)
+    with their scores, boxes (in pixels) and coarse masks, before the threshold,
+    plus each candidate's refined mask once made. The detector does not use the
+    threshold, so these serve every threshold and max_detections."""
+
+    def __init__(self, out, height, width):
+        self.probs = out["scores"][0].sigmoid().cpu()
+        boxes = out["boxes"][0]  # 0..1, scaled to pixels as the detector does
+        scale = torch.tensor([width, height, width, height], device=boxes.device, dtype=boxes.dtype)
+        self.boxes = (boxes * scale).cpu()
+        self.coarse = out["masks"][0].cpu()
+        self.refined = {}  # candidate index -> _Crop
+
+    @property
+    def nbytes(self):
+        return self.probs.nbytes + self.boxes.nbytes + self.coarse.nbytes + sum(c.nbytes for c in self.refined.values())
+
+    def kept(self, threshold, max_det):
+        """The candidates SAM3 Detect keeps: over the threshold, most confident first."""
+        keep = self.probs > threshold
+        order = self.probs[keep].argsort(descending=True)[:max_det]
+        return keep.nonzero().flatten()[order].tolist()
+
+
+_255 = np.float32(255.0)
+
+
+def _from_uint8(pixels):
+    # The loader's own conversion (to_float_rgb: uint8 -> float32, / 255.0 in
+    # float32), in one pass, so the values match to the bit.
+    return torch.from_numpy(np.divide(pixels.numpy(), _255, dtype=np.float32))
+
+
+def _compact(image):
+    """float32 [1, H, W, 3] -> uint8 when that converts back to exactly the same
+    values (any 8-bit image), otherwise the float32 image (16-bit greyscale)."""
+    pixels = image[0].numpy()
+    out = np.empty(pixels.shape, dtype=np.uint8)
+    for y in range(0, pixels.shape[0], 256):  # in strips, to keep the extra memory small
+        strip = pixels[y:y + 256]
+        work = np.multiply(strip, _255)
+        np.rint(work, out=work)
+        np.clip(work, 0, 255, out=work)
+        quantized = out[y:y + 256]
+        np.copyto(quantized, work, casting="unsafe")
+        np.divide(quantized, _255, out=work, dtype=np.float32)
+        if not np.array_equal(work, strip):
+            return image
+    return torch.from_numpy(out)[None]
+
+
+class _CachedImage:
+    """One image and what SAM 3 found in it, kept between previews and runs."""
+
+    def __init__(self, image):
+        self.height, self.width = int(image.shape[1]), int(image.shape[2])
+        self.pixels = _compact(image)  # uint8 takes a quarter of the float32 image
+        self.frame = None  # SAM 3's 1008x1008 input, float32 on the CPU
+        self.trunk = {}  # model name -> (device, image encoder output for the frame, on the CPU)
+        self.dets = OrderedDict()  # (model name, prompt key) -> _Candidates
+        self.extras = OrderedDict()  # (model name, x, y) -> point-prompt _Crop, or None
+        self.labels = {}  # the masks a label map shows -> its data URL
+
+    def image(self):
+        """The image as the loader returns it: float32 [1, H, W, 3]."""
+        return _from_uint8(self.pixels) if self.pixels.dtype == torch.uint8 else self.pixels
+
+    def sam_frame(self, get_image):
+        if self.frame is None:
+            image = get_image()
+            self.frame = comfy.utils.common_upscale(image[..., :3].movedim(-1, 1), 1008, 1008, "bilinear", crop="disabled")
+        return self.frame
+
+    @property
+    def nbytes(self):
+        n = self.pixels.nbytes + (self.frame.nbytes if self.frame is not None else 0)
+        n += sum(out.nbytes for _, out in self.trunk.values())
+        n += sum(c.nbytes for c in self.dets.values())
+        n += sum(c.nbytes for c in self.extras.values() if c is not None)
+        return n + sum(len(url) for url in self.labels.values())
+
+
+def _cached_image(path, image_name):
+    """(_CachedImage, the float32 image when it was just loaded, else None)."""
+    key = (path, os.path.getmtime(path))
+    cached = _images.get(key)
+    loaded = None
+    if cached is None:
+        for old in [k for k in _images if k[0] == path]:
+            del _images[old]  # the file has changed since
+        frames = LoadImageWithFilenameHEIC().load_image(image_name)[0]
+        # A view of the first frame would keep every frame of a GIF alive.
+        loaded = frames if len(frames) == 1 else frames[:1].clone()
+        cached = _CachedImage(loaded)
+        _images[key] = cached
+    _images.move_to_end(key)
+    return cached, loaded
+
+
+def _trim_cache():
+    """Drop the least recently used images while all of them together hold more
+    than _CACHE_MAX_BYTES. The newest one is always kept."""
+    while len(_images) > 1 and sum(c.nbytes for c in _images.values()) > _CACHE_MAX_BYTES:
+        _images.popitem(last=False)
+
+
+class _TrunkMemo:
+    """Runs SAM 3's image encoder (the ViT trunk, most of its work) once per input.
+
+    ComfyUI's SAM 3 runs it again for each comma-separated prompt, for both
+    passes of each mask refinement (on the same crop), and for both passes of a
+    point prompt. While active, a call with the input of an earlier call returns
+    that call's output. The frame's output is pinned for the whole run and can be
+    passed in from, or saved to, the cache."""
+
+    def __init__(self, sam):
+        try:
+            self.trunk = sam.detector.backbone["vision_backbone"].trunk
+        except (AttributeError, KeyError, TypeError):
+            self.trunk = None  # another ComfyUI SAM 3 layout: run it as it is
+        self.frame = self.frame_out = self.on_frame = None
+        self.last = self.last_out = None
+
+    def pin(self, frame, out=None, on_computed=None):
+        self.frame, self.frame_out, self.on_frame = frame, out, on_computed
+
+    def __enter__(self):
+        if self.trunk is not None:
+            run = self.trunk.forward
+
+            def forward(x, *args, **kwargs):
+                if args or kwargs:
+                    return run(x, *args, **kwargs)
+                if x is self.frame and self.frame_out is not None:
+                    return self.frame_out
+                if x is self.last:
+                    return self.last_out
+                out = run(x)
+                if x is self.frame:
+                    self.frame_out = out
+                    if self.on_frame is not None:
+                        self.on_frame(out)
+                else:
+                    self.last, self.last_out = x, out  # holding x keeps its id from being reused
+                return out
+
+            self.trunk.forward = forward
+        return self
+
+    def __exit__(self, *exc):
+        if self.trunk is not None:
+            self.trunk.__dict__.pop("forward", None)
+        self.frame = self.frame_out = self.on_frame = self.last = self.last_out = None
+        return False
+
+
+class _Run:
+    """What one preview or node run shares, each part made when first needed: a
+    run answered from the cache never loads or moves the model or converts the image."""
+
+    def __init__(self, cached, model_name, device, stack, image=None):
+        self.cached = cached
+        self.model_name = model_name
+        self.device = device  # None = ComfyUI's main GPU
+        self._stack = stack
+        self._sam = None
+        self._image = image  # the float32 image, when the run has it already
+        self._frame = None
+
+    def handle(self):
+        return _get_model(self.model_name, self.device)
+
+    def sam(self):
+        """(handle, device, dtype, trunk memo), with the weights on the device."""
+        if self._sam is None:
+            handle = self.handle()
+            device, dtype = _prepare(handle)
+            memo = self._stack.enter_context(_TrunkMemo(handle["sam"]))
+            self._sam = (handle, device, dtype, memo)
+        return self._sam
+
+    def image(self):
+        if self._image is None:
+            self._image = self.cached.image()
+        return self._image
+
+    def frame(self):
+        """The 1008x1008 frame on the device. Its image encoder output comes from the
+        cache when it was made on this device, and is saved there otherwise."""
+        if self._frame is None:
+            _, device, dtype, memo = self.sam()
+            self._frame = self.cached.sam_frame(self.image).to(device=device, dtype=dtype)
+            trunk, name = self.cached.trunk, self.model_name
+            saved = trunk.get(name)
+            if saved is not None and saved[0] == device:
+                memo.pin(self._frame, saved[1].to(device))
+            else:
+                def save(out):
+                    if torch.is_tensor(out):
+                        trunk[name] = (device, out.cpu())
+
+                memo.pin(self._frame, None, save)
+        return self._frame
+
+
+def _candidates(run, text, part, key):
+    """The candidates for one prompt part, from the cache or from SAM 3's detector."""
+    dets = run.cached.dets
+    det_key = (run.model_name, key)
+    found = dets.get(det_key)
+    if found is None:
+        _checkpoint()
+        extract_text_prompts, _ = _sam3_helpers()
+        handle, device, dtype, _ = run.sam()
+        frame = run.frame()
+        embeddings, text_mask, _ = extract_text_prompts(_encode(handle, text), device, dtype)[part]
+        # SAM3 Detect passes orig_size, which makes the detector enlarge the masks
+        # of all 200 candidates to the image size: several GB of VRAM for a phone
+        # photo. Here only the kept masks are enlarged, the same way (_refined).
+        # The detector ignores `threshold`; it is applied afterwards (kept).
+        out = handle["sam"](frame, text_embeddings=embeddings, text_mask=text_mask, boxes=None, threshold=0.0, orig_size=None)
+        found = _Candidates(out, run.cached.height, run.cached.width)
+        del out
+        dets[det_key] = found
+        while len(dets) > _DETS_PER_IMAGE:
+            dets.popitem(last=False)
+    dets.move_to_end(det_key)
+    return found
+
+
+def _refined(run, found, index):
+    """Candidate `index` refined as SAM3 Detect refines it -> _Crop. Bilinear
+    enlarging works on each mask separately, so enlarging only this one gives
+    the same mask as enlarging all of them."""
+    crop = found.refined.get(index)
+    if crop is None:
+        _checkpoint()
+        _, refine_mask = _sam3_helpers()
+        handle, device, dtype, _ = run.sam()
+        H, W = run.cached.height, run.cached.width
+        coarse = found.coarse[index].to(device)
+        full = F.interpolate(coarse[None, None], size=(H, W), mode="bilinear", align_corners=False)[0, 0]
+        mask = refine_mask(handle["sam"], run.image()[0], full, found.boxes[index], H, W, device, dtype, REFINE_ITERATIONS)
+        crop = _Crop(mask[0].cpu() > 0.5)
+        found.refined[index] = crop
+    return crop
+
+
+def _point_mask(run, px, py):
+    """SAM3 Detect's point-prompt path for a click no detected mask covers ->
+    _Crop, or None when SAM finds nothing there."""
+    extras = run.cached.extras
+    key = (run.model_name, px, py)
     if key in extras:
         extras.move_to_end(key)
         return extras[key]
-    mask = _point_segment(get_handle(), entry["image"], px, py)
-    mask = mask if bool(mask.any()) else None
-    extras[key] = mask
+    _checkpoint()
+    handle, device, dtype, _ = run.sam()
+    frame = run.frame()
+    sam = handle["sam"]
+    H, W = run.cached.height, run.cached.width
+    points = {
+        "point_coords": torch.tensor([[[px / W * 1008, py / H * 1008]]], dtype=dtype, device=device),
+        "point_labels": torch.tensor([[1]], dtype=torch.int32, device=device),
+    }
+    logit = sam.forward_segment(frame, point_inputs=points)
+    for _ in range(REFINE_ITERATIONS - 1):
+        logit = sam.forward_segment(frame, mask_inputs=logit)
+    mask = F.interpolate(logit, size=(H, W), mode="bilinear", align_corners=False)[0, 0].cpu() > 0
+    crop = _Crop(mask) if bool(mask.any()) else None
+    extras[key] = crop
     while len(extras) > _EXTRA_CACHE_MAX:
         extras.popitem(last=False)
-        entry["labels"].clear()
-    return mask
+    return crop
 
 
 def _resolve(image_name, model_name, device, prompt, max_detections, threshold, points):
     """Masks for the image and which of them the points select.
 
-    Returns the image, all masks [M, H, W] (detected first, then point-prompt
-    ones), the number detected, the selected indices and each point's index (-1
-    for a point that selects nothing). The model is only loaded when something
-    is not cached yet."""
+    Returns the masks as _Crops (detected first, then point-prompt ones), the
+    number detected, the selected indices and each point's index (-1 for a point
+    that selects nothing). The model is only loaded when something is not cached yet."""
     run_on = device or _main_device()
     # The current CUDA device is per thread, so switching it here does not
     # affect a running workflow.
@@ -470,76 +797,87 @@ def _resolve(image_name, model_name, device, prompt, max_detections, threshold, 
 
 
 def _resolve_on(image_name, model_name, device, prompt, max_detections, threshold, points):
-    get_handle = lambda: _get_model(model_name, device)  # noqa: E731
-    with torch.no_grad():
-        entry = _detect(image_name, get_handle, model_name, prompt, max_detections, threshold)
-        detected = entry["masks"]
-        n, H, W = detected.shape
-        # The point-prompt masks this selection uses are held here, not looked up
-        # in entry["extras"] again: that cache keeps only the newest 16.
-        extra_keys, extra_masks = [], []
-        point_labels = []
-        for x, y in points:
-            px = min(W - 1, max(0, int(x * W)))
-            py = min(H - 1, max(0, int(y * H)))
-            label = -1
-            hits = detected[:, py, px].nonzero().flatten()
-            if len(hits):
-                # Overlapping people: the smaller mask is the one drawn on top.
-                label = int(hits[entry["areas"][hits].argmin()])
-            else:
-                for i, extra in enumerate(extra_masks):
-                    if extra[py, px]:
-                        label = n + i
-                        break
-                if label < 0:
-                    mask = _point_mask(entry, get_handle, px, py)
-                    if mask is not None:
-                        extra_keys.append((px, py))
-                        extra_masks.append(mask)
-                        label = n + len(extra_masks) - 1
-            point_labels.append(label)
-
-        masks = detected
-        if extra_masks:
-            masks = torch.cat([detected, torch.stack(extra_masks)])
+    cached, loaded = _cached_image(_image_path(image_name), image_name)
+    text = _prompt_text(prompt, max_detections)
+    with contextlib.ExitStack() as stack, torch.no_grad():
+        run = _Run(cached, model_name, device, stack, loaded)
+        try:
+            masks, shown = [], []
+            for part, (key, max_det) in enumerate(_prompt_keys(run.handle, model_name, text)):
+                found = _candidates(run, text, part, key)
+                for index in found.kept(threshold, max_det):
+                    masks.append(_refined(run, found, index))
+                    shown.append((key, index))
+            n = len(masks)
+            H, W = cached.height, cached.width
+            extra_keys = []
+            point_labels = []
+            for x, y in points:
+                px = min(W - 1, max(0, int(x * W)))
+                py = min(H - 1, max(0, int(y * H)))
+                label = -1
+                hits = [i for i in range(n) if masks[i].at(py, px)]
+                if hits:
+                    # Overlapping people: the smaller mask is the one drawn on top.
+                    label = min(hits, key=lambda i: masks[i].area)
+                else:
+                    # Point-prompt masks this selection already made come next.
+                    label = next((i for i in range(n, len(masks)) if masks[i].at(py, px)), -1)
+                    if label < 0:
+                        mask = _point_mask(run, px, py)
+                        if mask is not None:
+                            masks.append(mask)
+                            extra_keys.append((px, py))
+                            label = len(masks) - 1
+                point_labels.append(label)
+        finally:
+            _trim_cache()
     return {
-        "entry": entry,
-        "extra_keys": tuple(extra_keys),
-        "image": entry["image"],
+        "cached": cached,
+        "image": run.image,
         "masks": masks,
+        "shown": (model_name, tuple(shown), tuple(extra_keys)),
         "n_detected": n,
         "selected": sorted({i for i in point_labels if i >= 0}),
         "point_labels": point_labels,
     }
 
 
+def _nearest_source(size, out):
+    """The source indices F.interpolate(mode="nearest") reads when resizing `size`
+    pixels to `out`, taken from resizing a ramp so they match it exactly."""
+    ramp = torch.arange(size, dtype=torch.float32).view(1, 1, size, 1)
+    return F.interpolate(ramp, size=(out, 1), mode="nearest").flatten().to(torch.int64).numpy()
+
+
 def _labels_url(result):
     """Label map (pixel = mask index + 1, 0 = nothing) as a small PNG. Labels are
     16 bit, red the low byte and green the high byte, since several comma-separated
-    prompts can find more than 255 things."""
-    cache = result["entry"]["labels"]
-    url = cache.get(result["extra_keys"])
+    prompts can find more than 255 things. Made from the masks at the label map's
+    own size: the pixels nearest-neighbour downscaling would pick, read from each."""
+    cached = result["cached"]
+    url = cached.labels.get(result["shown"])
     if url is None:
         masks = result["masks"][:LABEL_MAX]
-        _, H, W = masks.shape
-        labels = torch.zeros((H, W), dtype=torch.int32)
-        areas = masks.flatten(1).sum(1)
-        for i in torch.argsort(areas, descending=True).tolist():
-            labels[masks[i]] = i + 1  # largest first, so smaller masks end up on top
+        H, W = cached.height, cached.width
         scale = min(1.0, LABEL_MAX_SIDE / max(H, W))
         if scale < 1.0:
-            size = (max(1, round(H * scale)), max(1, round(W * scale)))
-            labels = F.interpolate(labels[None, None].float(), size=size, mode="nearest")[0, 0].to(torch.int32)
-        labels = labels.numpy()
+            rows = _nearest_source(H, max(1, round(H * scale)))
+            cols = _nearest_source(W, max(1, round(W * scale)))
+        else:
+            rows, cols = np.arange(H), np.arange(W)
+        labels = np.zeros((len(rows), len(cols)), dtype=np.int32)
+        areas = torch.tensor([m.area for m in masks], dtype=torch.int64)
+        for i in torch.argsort(areas, descending=True).tolist():
+            labels[masks[i].sample(rows, cols)] = i + 1  # largest first, so smaller masks end up on top
         rgb = np.zeros((*labels.shape, 3), dtype=np.uint8)
         rgb[..., 0] = labels & 0xFF
         rgb[..., 1] = labels >> 8
         buf = io.BytesIO()
         Image.fromarray(rgb).save(buf, format="PNG")
         url = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
-        cache.clear()
-        cache[result["extra_keys"]] = url
+        cached.labels.clear()
+        cached.labels[result["shown"]] = url
     return url
 
 
@@ -560,10 +898,12 @@ def _parse_points(raw):
     return points
 
 
-def _preview(body, device):
+def _preview(body, device, request):
     with _lock, torch.inference_mode():
         _tls.preview = True
+        _tls.request = request
         try:
+            _checkpoint()  # a newer request may have come while this one waited
             result = _resolve(
                 body.get("image"),
                 str(body.get("sam3_model", "")),
@@ -573,11 +913,10 @@ def _preview(body, device):
                 float(body.get("threshold", 0.5)),
                 _parse_points(body.get("points")),
             )
-            _, H, W = result["masks"].shape
             return {
-                "width": W,
-                "height": H,
-                "count": int(result["masks"].shape[0]),
+                "width": result["cached"].width,
+                "height": result["cached"].height,
+                "count": len(result["masks"]),
                 "n_detected": result["n_detected"],
                 "selected": result["selected"],
                 "point_labels": result["point_labels"],
@@ -585,6 +924,7 @@ def _preview(body, device):
             }
         finally:
             _tls.preview = False
+            _tls.request = None
 
 
 @routes.post("/rulz/person_select/detect")
@@ -592,17 +932,25 @@ async def detect(request):
     try:
         body = await request.json()
         device = _target_device(body.get("device"))
+        client, number = _request_id(body)
     except ValueError as e:
         return web.json_response({"error": str(e)}, status=400)
     except Exception:
         return web.json_response({"error": "Invalid request body"}, status=400)
+    # Only the newest request from a node is worth answering; the frontend
+    # ignores "stale" replies.
+    if not _register_request(client, number):
+        return web.json_response({"error": "stale"}, status=409)
     # The main GPU is in use by a workflow; the frontend retries when the queue
     # is empty. A separate device does not have to wait.
     if device is None and _workflow_running():
         return web.json_response({"error": "busy"}, status=409)
     try:
         loop = asyncio.get_running_loop()
-        return web.json_response(await loop.run_in_executor(None, _preview, body, device))
+        request_info = (client, number, device is None)
+        return web.json_response(await loop.run_in_executor(None, _preview, body, device, request_info))
+    except _Stale:
+        return web.json_response({"error": "stale"}, status=409)
     except _Busy:
         return web.json_response({"error": "busy"}, status=409)
     except FileNotFoundError as e:
@@ -657,10 +1005,16 @@ class RulZPersonSelect:
         masks, selected = result["masks"], result["selected"]
         if not selected:
             raise ValueError("RulZ Person Select: the clicked point did not produce a mask. Click the person again.")
-        chosen = masks[selected].any(dim=0)
-        rest = [i for i in range(result["n_detected"]) if i not in selected]
-        others = masks[rest].any(dim=0) & ~chosen if rest else torch.zeros_like(chosen)
-        return (result["image"], chosen.float().unsqueeze(0), others.float().unsqueeze(0))
+        size = (result["cached"].height, result["cached"].width)
+        chosen = torch.zeros(size, dtype=torch.bool)
+        others = torch.zeros(size, dtype=torch.bool)
+        for i in selected:
+            masks[i].paste(chosen)
+        for i in range(result["n_detected"]):
+            if i not in selected:
+                masks[i].paste(others)
+        others &= ~chosen
+        return (result["image"](), chosen.float().unsqueeze(0), others.float().unsqueeze(0))
 
     @classmethod
     def IS_CHANGED(cls, image, **kwargs):

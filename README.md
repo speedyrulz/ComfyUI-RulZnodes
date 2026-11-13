@@ -279,9 +279,15 @@ you clicked).
 - **Shift-click** (or Ctrl-click) adds or removes a person, so several can be selected.
 - Clicking something that was not detected asks SAM 3 for whatever is at that point and selects that.
 - The selection is saved with the workflow as click positions, so it is cleared when you change the image.
-- The preview runs SAM 3 when the image or a setting changes: a few seconds the first time while the model
+- The preview runs SAM 3 when the image or the prompt changes: a few seconds the first time while the model
   loads, then about 3 seconds per new image on `default` and about a second on a second GPU. On `default` it
   waits while a workflow is running.
+- What SAM 3 found is kept for each image, so changing `threshold` or `max_detections` takes a fraction of a
+  second: only people that were not shown before are worked out. Going back to an earlier image or prompt is
+  quick too. The kept results take about 0.2 GB of RAM for a 12 MP photo and 0.35 GB for a 94 MP one (about
+  35 MB more for each extra prompt), and at most 1 GB together.
+- Clicks and setting changes made while the preview is still busy don't pile up: only the newest one is worked
+  out.
 - SAM 3 runs on the node's own copy of the model, outside ComfyUI's model management. On `default` that copy
   waits in RAM (about 1.7 GB) and is moved to the main GPU only while it runs, so it never holds VRAM your
   workflows need.
