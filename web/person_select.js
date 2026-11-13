@@ -78,6 +78,13 @@ function decodeLabels(url) {
   });
 }
 
+// Identifies this node's preview requests to the server, which skips the ones a
+// newer request from the same node has replaced. Random rather than the node id:
+// two tabs with the same workflow must not replace each other's requests.
+function clientId() {
+  return globalThis.crypto?.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+}
+
 function setup(node) {
   const widget = (name) => node.widgets?.find((w) => w.name === name);
   const imageWidget = widget("image");
@@ -86,7 +93,16 @@ function setup(node) {
 
   // state.map: label map from the server; state.selected / pointLabels: its answer
   // for the current points.
-  const state = { map: null, selected: new Set(), pointLabels: [], hover: 0, seq: 0, waiting: false, autoHeight: MIN_HEIGHT };
+  const state = {
+    map: null,
+    selected: new Set(),
+    pointLabels: [],
+    hover: 0,
+    seq: 0,
+    client: clientId(),
+    waiting: false,
+    autoHeight: MIN_HEIGHT,
+  };
 
   const root = document.createElement("div");
   root.style.cssText = "display:flex;flex-direction:column;width:100%;height:100%;min-height:0;gap:4px;";
@@ -205,7 +221,7 @@ function setup(node) {
     const seq = ++state.seq;
     state.waiting = false;
     setStatus(state.map ? "Updating..." : "Finding people (first run loads SAM 3)...");
-    const body = { image, sam3_model: model, points: getPoints() };
+    const body = { image, sam3_model: model, points: getPoints(), client: state.client, seq };
     for (const name of ["prompt", "max_detections", "threshold", "device"]) body[name] = widget(name)?.value;
     try {
       const resp = await api.fetchApi(ROUTE, {
@@ -215,6 +231,8 @@ function setup(node) {
       });
       const data = await resp.json();
       if (seq !== state.seq) return;
+      // Replaced by a newer request from this node; its reply is the one to show.
+      if (resp.status === 409 && data?.error === "stale") return;
       if (resp.status === 409) {
         state.waiting = true;
         setStatus("Waiting for the running workflow. Set device to another GPU to preview now.");
