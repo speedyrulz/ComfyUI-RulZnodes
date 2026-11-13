@@ -13,6 +13,9 @@ const DETECT_WIDGETS = ["sam3_model", "prompt", "max_detections", "threshold", "
 const MIN_HEIGHT = 220;
 const MAX_AUTO_HEIGHT = 560;
 const TOOLBAR_HEIGHT = 30;
+// While a workflow keeps the main GPU busy, ask again this often in case the
+// "queue empty" status event arrives before the busy reply does.
+const BUSY_RETRY_MS = 4000;
 
 const COLOR_SELECTED = [40, 230, 120, 120];
 const COLOR_HOVER = [255, 215, 60, 110];
@@ -65,8 +68,9 @@ function decodeLabels(url) {
       ctx.imageSmoothingEnabled = false;
       ctx.drawImage(img, 0, 0);
       const rgba = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
-      const labels = new Uint8Array(canvas.width * canvas.height);
-      for (let i = 0; i < labels.length; i++) labels[i] = rgba[i * 4];
+      // 16-bit labels: red is the low byte, green the high byte.
+      const labels = new Uint16Array(canvas.width * canvas.height);
+      for (let i = 0; i < labels.length; i++) labels[i] = rgba[i * 4] | (rgba[i * 4 + 1] << 8);
       resolve({ labels, width: canvas.width, height: canvas.height });
     };
     img.onerror = () => reject(new Error("could not decode the mask preview"));
@@ -143,7 +147,8 @@ function setup(node) {
     frame.style.width = `${Math.floor(w * scale)}px`;
     frame.style.height = `${Math.floor(h * scale)}px`;
   }
-  new ResizeObserver(layout).observe(stage);
+  const resizeObserver = new ResizeObserver(layout);
+  resizeObserver.observe(stage);
 
   function draw() {
     const map = state.map;
@@ -213,6 +218,7 @@ function setup(node) {
       if (resp.status === 409) {
         state.waiting = true;
         setStatus("Waiting for the running workflow. Set device to another GPU to preview now.");
+        scheduleRefresh(BUSY_RETRY_MS);
         return;
       }
       if (!resp.ok) throw new Error(data?.error ?? `${resp.status} ${resp.statusText}`);
@@ -387,6 +393,7 @@ function setup(node) {
   const onRemoved = node.onRemoved;
   node.onRemoved = function () {
     api.removeEventListener("status", onStatus);
+    resizeObserver.disconnect();
     clearTimeout(timer);
     state.seq++;
     return onRemoved?.apply(this, arguments);

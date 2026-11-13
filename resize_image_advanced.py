@@ -505,7 +505,15 @@ The resulting output resolution is shown on the node.
             except Exception:
                 pass
 
-        out_mask = out_mask.cpu() if out_mask is not None else torch.zeros(1, 64, 64, device=torch.device("cpu"), dtype=torch.float32)
+        if out_mask is not None:
+            out_mask = out_mask.cpu()
+        elif pad_modes:
+            # The pad modes' mask marks the padding. With nothing to pad it is an empty
+            # mask of the output size, as it is the output size when there was padding.
+            # One frame is enough for an empty mask (a video batch would need GBs).
+            out_mask = torch.zeros(1, out_h, out_w, dtype=torch.float32)
+        else:
+            out_mask = torch.zeros(1, 64, 64, device=torch.device("cpu"), dtype=torch.float32)
 
         return {
             "ui": {"text": [resolution_text]},

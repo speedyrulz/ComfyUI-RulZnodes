@@ -76,16 +76,29 @@ async function uploadFiles(node, fileList) {
   const files = [...(fileList ?? [])].filter(isImageFile);
   files.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
   const paths = [];
+  const failed = [];
   // One at a time so the list keeps the sorted order.
   for (const file of files) {
     try {
       paths.push(await uploadFile(file));
     } catch (e) {
       console.error(`[LoadImageBatchHEIC] upload of ${file.name} failed`, e);
+      failed.push(`${file.name}: ${e?.message ?? e}`);
     }
   }
   addImages(node, paths);
+  if (failed.length) reportFailures(failed);
   return files.length > 0;
+}
+
+// Without this a failed file just leaves the list one image short.
+function reportFailures(failed) {
+  const detail = `Could not upload ${failed.length} image${failed.length === 1 ? "" : "s"}: ${failed.slice(0, 3).join("; ")}${
+    failed.length > 3 ? "; ..." : ""
+  }`;
+  const toast = app.extensionManager?.toast;
+  if (toast?.add) toast.add({ severity: "error", summary: "RulZ Load Image Batch (HEIC)", detail, life: 8000 });
+  else alert(detail);
 }
 
 function openPicker(node) {

@@ -103,8 +103,9 @@ A tab in ComfyUI's left sidebar (the **RulZ Images** button) rather than a node 
 - The images go to the selected RulZ Load Image Batch (HEIC) node, or the first one in the workflow if none
   is selected. If the workflow has none, one is added.
 - The folder is read on the machine that runs ComfyUI, so with a remote ComfyUI it browses that machine. Any
-  browser that can reach your ComfyUI can list folders and view image thumbnails through this tab's routes;
-  keep that in mind if you start ComfyUI with `--listen`.
+  browser that can reach your ComfyUI can use this tab's routes to list folders, view thumbnails of any image
+  on that machine and copy images into the input folder, where ComfyUI serves them at full size. Keep that in
+  mind if you start ComfyUI with `--listen`.
 
 ## RulZ Simple Load Image Batch
 
@@ -309,8 +310,8 @@ you clicked).
 From the second sampling step on, Qwen Image 2.1 reuses cached text and reference-image keys, and the image being
 generated puts most of its attention on a minority of them. On that step the node estimates, for every layer, which
 64-token key blocks hold `tau` of the attention, then computes only those for the rest of the run with a copy of
-SageAttention's kernel that skips the other blocks. With every block kept the kernel gives SageAttention's exact
-output.
+SageAttention's kernel that skips the other blocks. With every block kept the kernel is as accurate as
+SageAttention (the same error against exact attention in testing, though not bit-for-bit the same output).
 
 | Input | Description |
 |---|---|

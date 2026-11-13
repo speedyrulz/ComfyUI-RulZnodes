@@ -27,6 +27,9 @@ THUMB_SIZE = 384
 _THUMB_CACHE_MAX = 512
 _thumb_cache = OrderedDict()  # (path, mtime) -> jpeg bytes
 _thumb_lock = threading.Lock()
+# Picking a free name in the input folder and copying to it is one step, so two
+# imports of different files with the same name can't both pick "photo (1).jpg".
+_import_lock = threading.Lock()
 
 routes = PromptServer.instance.routes
 
@@ -111,6 +114,8 @@ def _make_thumb(path):
         # JPEGs can decode straight to a smaller size, which is much faster.
         img.draft("RGB", (THUMB_SIZE, THUMB_SIZE))
         img = ImageOps.exif_transpose(img)
+        if img.mode.startswith("I;16"):  # 16-bit greyscale: thumbnail() can't resize these modes
+            img = img.convert("I")
         img.thumbnail((THUMB_SIZE, THUMB_SIZE))
         if img.mode.startswith("I"):  # 16-bit greyscale; convert("RGB") would clip it
             img = Image.fromarray((to_float_rgb(img) * 255.0).astype("uint8"))
@@ -157,12 +162,13 @@ def _import_one(src, input_dir):
     stem, ext = os.path.splitext(os.path.basename(src))
     dest = os.path.join(input_dir, stem + ext)
     n = 1
-    while os.path.exists(dest):
-        if _same_content(src, dest):
-            return os.path.basename(dest)
-        dest = os.path.join(input_dir, f"{stem} ({n}){ext}")
-        n += 1
-    shutil.copy2(src, dest)
+    with _import_lock:
+        while os.path.exists(dest):
+            if _same_content(src, dest):
+                return os.path.basename(dest)
+            dest = os.path.join(input_dir, f"{stem} ({n}){ext}")
+            n += 1
+        shutil.copy2(src, dest)
     return os.path.basename(dest)
 
 
@@ -182,14 +188,29 @@ def _error(status, message):
     return web.json_response({"error": message}, status=status)
 
 
+# Every filesystem call, existence checks included, runs in the executor: on an
+# unreachable network path or a sleeping NAS one can block for the SMB timeout,
+# and on the event loop that would stall the whole ComfyUI server.
+def _list(path):
+    if path and not os.path.isdir(path):
+        raise FileNotFoundError(path)
+    return _scan(path)
+
+
+def _thumb(path):
+    if not os.path.isfile(path):
+        return None
+    return _make_thumb(path)
+
+
 @routes.get("/rulz/image_browser/list")
 async def list_directory(request):
     path = _clean_path(request.rel_url.query.get("path", ""))
-    if path and not os.path.isdir(path):
-        return _error(404, f"Folder not found: {path}")
     try:
         loop = asyncio.get_running_loop()
-        return web.json_response(await loop.run_in_executor(None, _scan, path))
+        return web.json_response(await loop.run_in_executor(None, _list, path))
+    except FileNotFoundError:
+        return _error(404, f"Folder not found: {path}")
     except PermissionError:
         return _error(403, f"No permission to read: {path}")
     except OSError as e:
@@ -199,14 +220,16 @@ async def list_directory(request):
 @routes.get("/rulz/image_browser/thumb")
 async def thumbnail(request):
     path = _clean_path(request.rel_url.query.get("path", ""))
-    if not path or not _is_image(path) or not os.path.isfile(path):
+    if not path or not _is_image(path):
         return web.Response(status=404)
     try:
         loop = asyncio.get_running_loop()
-        data = await loop.run_in_executor(None, _make_thumb, path)
+        data = await loop.run_in_executor(None, _thumb, path)
     except Exception as e:
         print(f"[RulZ Image Browser] thumbnail failed for {path}: {e}")
         return web.Response(status=500)
+    if data is None:
+        return web.Response(status=404)
     # The pane puts the file's mtime in the URL, so a changed file is a new URL.
     return web.Response(
         body=data,

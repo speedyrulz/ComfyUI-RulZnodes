@@ -59,7 +59,10 @@ def _natural_key(name):
 def _list_images(directory):
     if not os.path.isdir(directory):
         return []
-    files = [f for f in os.listdir(directory) if f.lower().endswith(IMAGE_EXTS)]
+    # scandir: whether an entry is a file comes with the listing (no stat per file
+    # on Windows), which matters for big folders on a network share.
+    with os.scandir(directory) as entries:
+        files = [e.name for e in entries if e.name.lower().endswith(IMAGE_EXTS) and e.is_file()]
     files.sort(key=_natural_key)
     return files
 
