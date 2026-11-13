@@ -7,7 +7,7 @@ JPEG conversion instead. Nothing is written to disk and the original file is unt
 import asyncio
 import io
 import os
-from urllib.parse import unquote
+import threading
 
 from aiohttp import web
 from PIL import Image, ImageOps
@@ -19,30 +19,34 @@ HEIF_EXTENSIONS = (".heic", ".heif")
 VIEW_PATHS = ("/view", "/api/view")
 _cache = {}  # (path, mtime) -> jpeg bytes
 _CACHE_MAX = 16
+_cache_lock = threading.Lock()  # conversions run in several executor threads at once
 
 
 def _convert(path):
     key = (path, os.path.getmtime(path))
-    data = _cache.get(key)
+    with _cache_lock:
+        data = _cache.get(key)
     if data is None:
         with Image.open(path) as img:
             img = ImageOps.exif_transpose(img).convert("RGB")
             buf = io.BytesIO()
             img.save(buf, format="JPEG", quality=90)
         data = buf.getvalue()
-        if len(_cache) >= _CACHE_MAX:
-            _cache.pop(next(iter(_cache)))
-        _cache[key] = data
+        with _cache_lock:
+            while len(_cache) >= _CACHE_MAX:
+                _cache.pop(next(iter(_cache)))
+            _cache[key] = data
     return data
 
 
 @web.middleware
 async def heic_view_middleware(request, handler):
     if request.method == "GET" and request.path in VIEW_PATHS:
+        # aiohttp has already URL-decoded the query (as ComfyUI's /view uses it);
+        # decoding again would turn a literal "%20" in a name into a space.
         filename = request.rel_url.query.get("filename", "")
         if filename.lower().endswith(HEIF_EXTENSIONS):
             try:
-                filename = unquote(filename)
                 subfolder = request.rel_url.query.get("subfolder", "")
                 base = folder_paths.get_directory_by_type(
                     request.rel_url.query.get("type", "output")

@@ -25,6 +25,7 @@ import re
 import threading
 from collections import OrderedDict
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 from aiohttp import web
@@ -41,19 +42,31 @@ from .load_image_heic import LoadImageWithFilenameHEIC, _list_images
 
 DEFAULT_DEVICE = "default"
 LABEL_MAX_SIDE = 1024  # longest side of the label map sent to the frontend
+LABEL_MAX = 0xFFFF  # label map pixels are 16 bit (red = low byte, green = high byte)
 REFINE_ITERATIONS = 2  # SAM decoder passes per mask, as SAM3 Detect's default
 _DET_CACHE_MAX = 2  # each entry holds full-resolution masks for one image
 _EXTRA_CACHE_MAX = 16
 _TEXT_CACHE_MAX = 32
 _CPU = torch.device("cpu")
 
+_SAM3_KEY = "detector.backbone.vision_backbone.trunk.blocks.0.attn.qkv.weight"  # as ComfyUI detects SAM 3
+
 _lock = threading.Lock()  # one SAM inference at a time (preview route and node)
-_models = {}  # (checkpoint, device string or None) -> loaded model handle
+_models = {}  # checkpoint name -> loaded model handle
+_not_sam = {}  # checkpoint path -> mtime, for files found not to be SAM 3
 _text_cache = {}  # (model key, prompt text) -> conditioning
 _det_cache = OrderedDict()
 _tls = threading.local()  # .preview is True while a preview request runs
 
 routes = PromptServer.instance.routes
+
+
+class _Busy(Exception):
+    """A workflow started while a preview for the main GPU was waiting its turn."""
+
+
+def _workflow_running():
+    return bool(PromptServer.instance.prompt_queue.currently_running)
 
 
 def _install_interrupt_guard():
@@ -157,6 +170,63 @@ def _empty_cache():
         torch.cuda.empty_cache()
 
 
+@contextlib.contextmanager
+def _start_on_cpu():
+    """Make load_checkpoint_guess_config create the diffusion model on the CPU.
+
+    When VRAM looks plentiful (--highvram, or more free VRAM than RAM) it creates
+    the model straight on the main GPU and hands it to ComfyUI's model management
+    with load_models_gpu, which is what _get_model must never do. Loads are
+    serialized by _lock. A checkpoint the workflow thread loads in the same moment
+    also starts on the CPU, and ComfyUI moves it to the GPU when it is used."""
+    mm = comfy.model_management
+    original = getattr(mm, "unet_inital_load_device", None)
+    if original is None:
+        yield
+        return
+    mm.unet_inital_load_device = lambda *args, **kwargs: _CPU
+    try:
+        yield
+    finally:
+        mm.unet_inital_load_device = original
+
+
+def _text_encoder_options():
+    """The text encoder lives and runs on the CPU (see _encode). ComfyUI's CLIP()
+    calls load_models_gpu when the encoder is created on its load device, so name
+    the GPU as the load device and create it on the CPU instead. The dtype is the
+    one a CPU load device would get (with dynamic VRAM the checkpoint's own
+    weights are used as stored, fp16 in the SAM 3 releases)."""
+    main = _main_device()
+    if main.type == "cpu":
+        return {"load_device": _CPU, "offload_device": _CPU}
+    return {
+        "load_device": main,
+        "offload_device": _CPU,
+        "initial_device": _CPU,
+        "dtype": comfy.model_management.text_encoder_dtype(_CPU),
+    }
+
+
+def _check_sam3(name, path):
+    """Refuse a checkpoint that is not SAM 3 before loading it. The list holds every
+    checkpoint, and loading a 6-20 GB SDXL or Flux file on each preview refresh just
+    to reject it would take a long time and push the loaded SAM 3 out."""
+    mtime = os.path.getmtime(path)
+    if _not_sam.get(path) == mtime:
+        raise ValueError(f"'{name}' is not a SAM 3 checkpoint")
+    if not path.lower().endswith((".safetensors", ".sft")):
+        return  # no cheap way to look inside; the load itself checks
+    try:
+        header = comfy.utils.safetensors_header(path)
+        keys = json.loads(header) if header else None
+    except Exception:
+        return
+    if isinstance(keys, dict) and not any(k.endswith(_SAM3_KEY) for k in keys):
+        _not_sam[path] = mtime
+        raise ValueError(f"'{name}' is not a SAM 3 checkpoint")
+
+
 def _get_model(name, device):
     """The node's own copy of SAM 3, set to run on `device` (None = main GPU).
 
@@ -166,24 +236,34 @@ def _get_model(name, device):
     load until ComfyUI restarts."""
     handle = _models.get(name)
     if handle is None:
+        path = folder_paths.get_full_path_or_raise("checkpoints", name)
+        _check_sam3(name, path)
         # One checkpoint at a time; drop the old one to give its memory back.
         _models.clear()
         _text_cache.clear()
         _empty_cache()
-        path = folder_paths.get_full_path_or_raise("checkpoints", name)
-        out = comfy.sd.load_checkpoint_guess_config(
-            path,
-            output_vae=False,
-            output_clip=True,
-            embedding_directory=folder_paths.get_folder_paths("embeddings"),
-            # load_device picks the GPU dtype; the weights stay on the CPU until used.
-            model_options={"load_device": _main_device(), "offload_device": _CPU},
-            # The text encoder only runs once per prompt; keep it off every GPU.
-            te_model_options={"load_device": _CPU, "offload_device": _CPU},
-        )
+        try:
+            with _start_on_cpu():
+                out = comfy.sd.load_checkpoint_guess_config(
+                    path,
+                    output_vae=False,
+                    output_clip=True,
+                    embedding_directory=folder_paths.get_folder_paths("embeddings"),
+                    # load_device picks the GPU dtype; the weights stay on the CPU until used.
+                    model_options={"load_device": _main_device(), "offload_device": _CPU},
+                    # The text encoder only runs once per prompt; keep it off every GPU.
+                    te_model_options=_text_encoder_options(),
+                )
+        except RuntimeError as e:
+            if "Could not detect model type" not in str(e):
+                raise
+            # A .ckpt/.pt file the header check could not look inside.
+            _not_sam[path] = os.path.getmtime(path)
+            raise ValueError(f"'{name}' is not a SAM 3 checkpoint") from e
         model, clip = out[0], out[1]
         sam = model.model.diffusion_model
         if clip is None or not hasattr(sam, "forward_segment"):
+            _not_sam[path] = os.path.getmtime(path)
             raise ValueError(f"'{name}' is not a SAM 3 checkpoint")
         sam.to(_CPU)
         handle = {"key": name, "clip": clip, "sam": sam, "dtype": model.model.get_dtype(), "at": _CPU}
@@ -196,12 +276,21 @@ def _prepare(handle):
     """Device and dtype to run on, after moving the weights there."""
     device = handle["target"] or _main_device()
     if handle["at"] != device:
-        if handle["target"] is None and not getattr(_tls, "preview", False):
-            # On the workflow thread it is safe to ask ComfyUI to make room.
-            comfy.model_management.free_memory(3 * 1024**3, device)
+        if handle["target"] is None:
+            if getattr(_tls, "preview", False):
+                # The route checked the queue before this preview waited for the
+                # lock and loaded the checkpoint; check again before using the GPU.
+                if _workflow_running():
+                    raise _Busy()
+            else:
+                # On the workflow thread it is safe to ask ComfyUI to make room.
+                comfy.model_management.free_memory(3 * 1024**3, device)
         try:
             handle["sam"].to(device)
-        except torch.cuda.OutOfMemoryError:
+        except BaseException:
+            # Out of memory or any other failure part way: the layers moved
+            # before it stay on the GPU unless all of it is moved back.
+            handle["at"] = None
             _park(handle)
             raise
         handle["at"] = device
@@ -241,7 +330,12 @@ def _sam_frame(image, device, dtype):
 
 
 def _detect_masks(handle, image, conditioning, threshold):
-    """SAM3 Detect's text-prompt path for one image -> bool masks [N, H, W] on the CPU."""
+    """SAM3 Detect's text-prompt path for one image -> bool masks [N, H, W] on the CPU.
+
+    SAM3 Detect passes orig_size, which makes the detector enlarge the masks of
+    all 200 candidates to the image size before any is filtered out: several GB
+    of VRAM for a phone photo. Here only the kept masks are enlarged, the same
+    way (bilinear works on each mask separately), so the result is unchanged."""
     extract_text_prompts, refine_mask = _sam3_helpers()
     device, dtype = _prepare(handle)
     sam = handle["sam"]
@@ -249,13 +343,17 @@ def _detect_masks(handle, image, conditioning, threshold):
     frame = _sam_frame(image, device, dtype)
     masks = []
     for embeddings, text_mask, max_det in extract_text_prompts(conditioning, device, dtype):
-        out = sam(frame, text_embeddings=embeddings, text_mask=text_mask, boxes=None, threshold=threshold, orig_size=(H, W))
+        out = sam(frame, text_embeddings=embeddings, text_mask=text_mask, boxes=None, threshold=threshold, orig_size=None)
         probs = out["scores"][0].sigmoid()
         keep = probs > threshold
-        boxes, probs, coarse = out["boxes"][0][keep].cpu(), probs[keep].cpu(), out["masks"][0][keep]
+        boxes = out["boxes"][0][keep]  # 0..1, scaled to pixels as the detector does
+        boxes = boxes * torch.tensor([W, H, W, H], device=boxes.device, dtype=boxes.dtype)
+        boxes, probs, coarse = boxes.cpu(), probs[keep].cpu(), out["masks"][0][keep]
+        del out
         order = probs.argsort(descending=True)[:max_det]
         for i in order.tolist():
-            mask = refine_mask(sam, image[0], coarse[i], boxes[i], H, W, device, dtype, REFINE_ITERATIONS)
+            full = F.interpolate(coarse[i][None, None], size=(H, W), mode="bilinear", align_corners=False)[0, 0]
+            mask = refine_mask(sam, image[0], full, boxes[i], H, W, device, dtype, REFINE_ITERATIONS)
             masks.append(mask[0].cpu() > 0.5)
     if not masks:
         return torch.zeros((0, H, W), dtype=torch.bool)
@@ -328,14 +426,18 @@ def _detect(image_name, get_handle, model_name, prompt, max_detections, threshol
 
 def _point_mask(entry, get_handle, px, py):
     """SAM point prompt for a click that no detected mask covers."""
+    extras = entry["extras"]
     key = (px, py)
-    if key not in entry["extras"]:
-        mask = _point_segment(get_handle(), entry["image"], px, py)
-        entry["extras"][key] = mask if bool(mask.any()) else None
-        while len(entry["extras"]) > _EXTRA_CACHE_MAX:
-            entry["extras"].popitem(last=False)
-            entry["labels"].clear()
-    return entry["extras"][key]
+    if key in extras:
+        extras.move_to_end(key)
+        return extras[key]
+    mask = _point_segment(get_handle(), entry["image"], px, py)
+    mask = mask if bool(mask.any()) else None
+    extras[key] = mask
+    while len(extras) > _EXTRA_CACHE_MAX:
+        extras.popitem(last=False)
+        entry["labels"].clear()
+    return mask
 
 
 def _resolve(image_name, model_name, device, prompt, max_detections, threshold, points):
@@ -373,7 +475,9 @@ def _resolve_on(image_name, model_name, device, prompt, max_detections, threshol
         entry = _detect(image_name, get_handle, model_name, prompt, max_detections, threshold)
         detected = entry["masks"]
         n, H, W = detected.shape
-        extra_keys = []
+        # The point-prompt masks this selection uses are held here, not looked up
+        # in entry["extras"] again: that cache keeps only the newest 16.
+        extra_keys, extra_masks = [], []
         point_labels = []
         for x, y in points:
             px = min(W - 1, max(0, int(x * W)))
@@ -384,18 +488,21 @@ def _resolve_on(image_name, model_name, device, prompt, max_detections, threshol
                 # Overlapping people: the smaller mask is the one drawn on top.
                 label = int(hits[entry["areas"][hits].argmin()])
             else:
-                for i, k in enumerate(extra_keys):
-                    if entry["extras"][k][py, px]:
+                for i, extra in enumerate(extra_masks):
+                    if extra[py, px]:
                         label = n + i
                         break
-                if label < 0 and _point_mask(entry, get_handle, px, py) is not None:
-                    extra_keys.append((px, py))
-                    label = n + len(extra_keys) - 1
+                if label < 0:
+                    mask = _point_mask(entry, get_handle, px, py)
+                    if mask is not None:
+                        extra_keys.append((px, py))
+                        extra_masks.append(mask)
+                        label = n + len(extra_masks) - 1
             point_labels.append(label)
 
         masks = detected
-        if extra_keys:
-            masks = torch.cat([detected, torch.stack([entry["extras"][k] for k in extra_keys])])
+        if extra_masks:
+            masks = torch.cat([detected, torch.stack(extra_masks)])
     return {
         "entry": entry,
         "extra_keys": tuple(extra_keys),
@@ -408,22 +515,28 @@ def _resolve_on(image_name, model_name, device, prompt, max_detections, threshol
 
 
 def _labels_url(result):
-    """Label map (pixel = mask index + 1, 0 = nothing) as a small greyscale PNG."""
+    """Label map (pixel = mask index + 1, 0 = nothing) as a small PNG. Labels are
+    16 bit, red the low byte and green the high byte, since several comma-separated
+    prompts can find more than 255 things."""
     cache = result["entry"]["labels"]
     url = cache.get(result["extra_keys"])
     if url is None:
-        masks = result["masks"]
+        masks = result["masks"][:LABEL_MAX]
         _, H, W = masks.shape
-        labels = torch.zeros((H, W), dtype=torch.uint8)
+        labels = torch.zeros((H, W), dtype=torch.int32)
         areas = masks.flatten(1).sum(1)
-        for i in torch.argsort(areas, descending=True).tolist()[:255]:
+        for i in torch.argsort(areas, descending=True).tolist():
             labels[masks[i]] = i + 1  # largest first, so smaller masks end up on top
         scale = min(1.0, LABEL_MAX_SIDE / max(H, W))
         if scale < 1.0:
             size = (max(1, round(H * scale)), max(1, round(W * scale)))
-            labels = F.interpolate(labels[None, None].float(), size=size, mode="nearest")[0, 0].to(torch.uint8)
+            labels = F.interpolate(labels[None, None].float(), size=size, mode="nearest")[0, 0].to(torch.int32)
+        labels = labels.numpy()
+        rgb = np.zeros((*labels.shape, 3), dtype=np.uint8)
+        rgb[..., 0] = labels & 0xFF
+        rgb[..., 1] = labels >> 8
         buf = io.BytesIO()
-        Image.fromarray(labels.numpy(), mode="L").save(buf, format="PNG")
+        Image.fromarray(rgb).save(buf, format="PNG")
         url = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
         cache.clear()
         cache[result["extra_keys"]] = url
@@ -485,11 +598,13 @@ async def detect(request):
         return web.json_response({"error": "Invalid request body"}, status=400)
     # The main GPU is in use by a workflow; the frontend retries when the queue
     # is empty. A separate device does not have to wait.
-    if device is None and PromptServer.instance.prompt_queue.currently_running:
+    if device is None and _workflow_running():
         return web.json_response({"error": "busy"}, status=409)
     try:
         loop = asyncio.get_running_loop()
         return web.json_response(await loop.run_in_executor(None, _preview, body, device))
+    except _Busy:
+        return web.json_response({"error": "busy"}, status=409)
     except FileNotFoundError as e:
         return web.json_response({"error": str(e)}, status=404)
     except Exception as e:

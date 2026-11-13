@@ -2,7 +2,8 @@
 
 csrc/ is SageAttention's sm89 kernel (Apache-2.0, see LICENSE) changed to walk a per-query-block list of
 64-key blocks. It is built on first use with the CUDA toolkit; quantization reuses the installed
-sageattention 2 package, so a full block list gives exactly sageattn's output.
+sageattention 2 package, so a full block list is as accurate as sageattn: the same error against exact
+attention, though the outputs are not bit-identical.
 """
 import logging
 import os

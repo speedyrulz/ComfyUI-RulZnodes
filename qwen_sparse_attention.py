@@ -5,14 +5,16 @@ target image's queries attend [text, references, target]. Most of that attention
 64-token key blocks. On the second step this patch estimates, per layer, head and 128-query block, the
 fewest key blocks that hold `tau` of the attention mass, always keeps the text blocks, and reuses that
 block list for the rest of the sampling run. SageAttention's own kernel, changed to walk the list
-(sparse_sage/), computes only those blocks, so a full list gives sageattn's exact output.
+(sparse_sage/), computes only those blocks; a full list is as accurate as sageattn (not bit-identical).
 
 Everything else runs dense through the attention override already on the model (Patch Sage Attention KJ,
 say) or sageattn: the first step, masked prefix attention, the dense_layers, layers whose estimate keeps
 most blocks anyway, and any model that is not Qwen Image 2.1.
 """
+import contextlib
 import logging
 import re
+import threading
 
 import torch
 
@@ -61,16 +63,27 @@ def sequence_layout(x, context, ref_latents, image_slots):
 
 
 class SparsePatch:
-    """Options and per-sampling-run state; the ON_CLEANUP callback drops the block lists after each run."""
+    """Options and per-sampling-run state; the ON_CLEANUP callback drops the block lists after each run.
+
+    With CFG split across GPUs, cond and uncond run the model at the same time in separate threads, so
+    the sequence layout of the forward pass in progress is kept per thread."""
 
     def __init__(self, tau, dense_layers, previous):
         self.tau = tau
         self.dense_layers = dense_layers
         self.previous = previous
-        self.layout = None
+        self.local = threading.local()
         self.masks = {}
         self.logged = False
         self.warned = False
+
+    @property
+    def layout(self):
+        return getattr(self.local, "layout", None)
+
+    @layout.setter
+    def layout(self, value):
+        self.local.layout = value
 
     def reset(self):
         self.masks = {}
@@ -92,10 +105,12 @@ class SparsePatch:
             self.layout = None
             if self.masks and not self.logged:
                 self.logged = True
-                sparse = [e[2] for e in self.masks.values() if e]
+                # A snapshot: with CFG split across GPUs another thread may still be adding entries.
+                entries = list(self.masks.values())
+                sparse = [e[2] for e in entries if e]
                 if sparse:
                     logging.info(f"RulZ Qwen Sparse Sage: {len(sparse)} attention layers sparse at {sum(sparse) / len(sparse):.0%} "
-                                 f"of key blocks on average, {len(self.masks) - len(sparse)} dense")
+                                 f"of key blocks on average, {len(entries) - len(sparse)} dense")
 
     def attention(self, func, q, k, v, heads, mask, kwargs):
         if mask is None and self.layout is not None and q.dim() == 3 and not kwargs.get("skip_reshape", False):
@@ -116,25 +131,31 @@ class SparsePatch:
         d = c // heads
         if nq != target or nk != total or layer in self.dense_layers or q.dtype not in (torch.float16, torch.bfloat16) or d not in (64, 128):
             return None
-        key = (layer, b, nq, nk)
+        # cond and uncond run as separate calls when they are not batched together and can have the
+        # same token counts, and with CFG split across GPUs on different devices: each gets its own
+        # block list, on its own GPU.
+        key = (layer, b, nq, nk, q.device, tuple(transformer_options.get("cond_or_uncond") or ()))
         entry = self.masks.get(key)
         qn, kn, vn = q.view(b, nq, heads, d), k.view(b, nk, heads, d), v.view(b, nk, heads, d)
-        if entry is None:
-            entry = False
-            reason = unsupported_reason(q.device)
-            if reason is not None:
-                if not self.warned:
-                    self.warned = True
-                    logging.warning(f"RulZ Qwen Sparse Sage: running dense, {reason}")
-            else:
-                m = predict(qn, kn, self.tau, text_blocks)
-                density = m.float().mean().item()
-                if density <= MAX_DENSITY:
-                    entry = mask_to_lut(m) + (density,)
-            self.masks[key] = entry
-        if not entry:
-            return None
-        return sparse_sageattn(qn, kn, vn, entry[0], entry[1]).reshape(b, nq, c)
+        # The quantization and sparse kernels launch on the current CUDA device. ComfyUI's multi-GPU
+        # pool threads set theirs already; this makes sure it is the tensors' device in any case.
+        with torch.cuda.device(q.device) if q.device.type == "cuda" else contextlib.nullcontext():
+            if entry is None:
+                entry = False
+                reason = unsupported_reason(q.device)
+                if reason is not None:
+                    if not self.warned:
+                        self.warned = True
+                        logging.warning(f"RulZ Qwen Sparse Sage: running dense, {reason}")
+                else:
+                    m = predict(qn, kn, self.tau, text_blocks)
+                    density = m.float().mean().item()
+                    if density <= MAX_DENSITY:
+                        entry = mask_to_lut(m) + (density,)
+                self.masks[key] = entry
+            if not entry:
+                return None
+            return sparse_sageattn(qn, kn, vn, entry[0], entry[1]).reshape(b, nq, c)
 
 
 class QwenSparseSageAttention:
