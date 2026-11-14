@@ -1,0 +1,38 @@
+{
+  "configVersion": 1,
+  "name": "ComfyUI-RulZnodes",
+  "approval": {
+    "default": "auto",
+    "source": "Memory commit-pr-merge-after-node-updates (2026-11-10): \"commit, create a pr, then merge, always do this when updating nodes\"; pulls added 2026-11-13: \"in the future pull them for me when updated\". Still stop and ask for anything unusual: failing checks, merge conflicts, force pushes."
+  },
+  "checks": [],
+  "neverStage": ["AGENTS.md", "CLAUDE.md"],
+  "delivery": {
+    "mode": "pr",
+    "base": "main",
+    "mergeMethod": "squash",
+    "ci": "none",
+    "prTitle": "Add X and bump to N.N.N (or 'Fix X and bump to N.N.N', 'Make X faster and bump to N.N.N')"
+  },
+  "version": {
+    "source": "files",
+    "bump": "feature-minor",
+    "when": "in-pr",
+    "files": [
+      { "path": "pyproject.toml", "regex": "^version\\s*=\\s*\"([^\"]+)\"" }
+    ]
+  },
+  "tag": { "create": "none" },
+  "release": {
+    "mode": "registry",
+    "workflow": "publish.yml",
+    "skipWhenOnly": [".claude/**", "README.md", "assets/**"]
+  },
+  "wiki": { "enabled": false },
+  "pulls": {
+    "mainCheckout": true,
+    "note": "Pulling does not restart the running WSL ComfyUI instances, and never stop them yourself: tell the user to restart them, since their Python keeps the old code while browsers load the new web/*.js on refresh."
+  },
+  "extraSteps": [],
+  "notes": "publish.yml publishes to the Comfy Registry (and so ComfyUI-Manager) whenever pyproject.toml changes on main, so the version bump in the PR is the release. No tags, no GitHub releases, no PR CI. Before pulling, each copy must be clean, on main and able to fast-forward; otherwise stop and ask. The WSL copy is listed in .claude/ship.local.json. Testing in the WSL ComfyUI is allowed for this pack (see the comfyui-dev skill); run only light extra instances there after checking free -g."
+}
