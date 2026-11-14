@@ -12,8 +12,11 @@ app.registerExtension({
       if (!text) return;
       let w = this.widgets?.find((w) => w.name === "status");
       if (!w) {
-        w = this.addWidget("text", "status", "", () => {}, { serialize: false });
-        w.disabled = true;
+        // Display only. Not `disabled`: current frontends draw a disabled widget
+        // without its value. read_only makes it read-only in Vue nodes mode, and the
+        // no-op click keeps the canvas from opening an edit prompt.
+        w = this.addWidget("text", "status", "", () => {}, { serialize: false, read_only: true });
+        w.onClick = () => {};
       }
       w.value = text;
       // Grow to fit the status line, but keep any size the user dragged it to.
