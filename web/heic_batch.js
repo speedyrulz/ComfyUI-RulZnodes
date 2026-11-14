@@ -120,8 +120,11 @@ app.registerExtension({
       const r = onNodeCreated?.apply(this, arguments);
       state(this);
 
-      const status = this.addWidget("text", "queue", "", () => {}, { serialize: false });
-      status.disabled = true;
+      // Display only. Not `disabled`: current frontends draw a disabled widget
+      // without its value. read_only makes it read-only in Vue nodes mode, and the
+      // no-op click keeps the canvas from opening an edit prompt.
+      const status = this.addWidget("text", "queue", "", () => {}, { serialize: false, read_only: true });
+      status.onClick = () => {};
 
       const combo = comboWidget(this);
       if (combo) {

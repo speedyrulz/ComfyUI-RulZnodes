@@ -387,7 +387,7 @@ class DeSkinTexture:
                 "screen_door": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.05,
                                 "tooltip": "Removes the fine pixel-aligned 2/4/8 px grid (VAE 'screen door') inside the mask. Surgical - leaves other detail alone. 0 = off."}),
                 "edge_protect": ("FLOAT", {"default": 4.0, "min": 0.0, "max": 20.0, "step": 0.5,
-                                 "tooltip": "Leave alone anything stronger than N x the typical pattern amplitude (edges, lips, eyes, hems). 0 = off. Raise if real edges still soften; lower if strong pattern survives next to edges."}),
+                                 "tooltip": "Leave alone anything stronger than N x the typical pattern amplitude (edges, lips, eyes, hems). 0 = off. Lower protects more: lower it if real edges still soften or get a halo; raise it if strong pattern survives next to edges."}),
             },
             "optional": {
                 "mask": ("MASK", {"tooltip": "Optional. White = apply fix. Overrides mask_mode. Use a face-parsing / SAM skin mask for best results."}),
