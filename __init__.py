@@ -13,6 +13,7 @@ _MODULES = (
     "random_prompt_selector",
     "qwen_sparse_attention",
     "person_select",
+    "generate_text",
 )
 
 NODE_CLASS_MAPPINGS = {}
