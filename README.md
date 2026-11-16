@@ -11,7 +11,8 @@
   Nodes for ComfyUI: load HEIC photos with their filename, pick images from a sidebar browser or step through a
   folder one image per run, crop to a mask with sensible padding, resize with megapixel and input-size targets,
   remove honeycomb skin texture, turn off the Comfy compiler per workflow, pick a random prompt from a text file,
-  mask a person by clicking them, and run Qwen Image 2.1 attention block-sparse.
+  mask a person by clicking them, run Qwen Image 2.1 attention block-sparse, and write text with a language
+  model, several answers in one pass.
 </p>
 
 ## Nodes
@@ -29,6 +30,7 @@
 | [**RulZ Random Prompt Selector**](#rulz-random-prompt-selector) | Outputs a random line from a text file of prompts, chosen by the seed. |
 | [**RulZ Person Select (SAM3)**](#rulz-person-select-sam3) | Load an image, click a person on the node, and get a mask of that person and a mask of everyone else. |
 | [**RulZ Qwen Sparse Sage Attention**](#rulz-qwen-sparse-sage-attention) | Block-sparse SageAttention for Qwen Image 2.1: sampling steps take about 23% less time at 4 MP, with SageAttention's quality. |
+| [**RulZ Generate Text**](#rulz-generate-text) | Generate Text that writes several answers in one pass: a list of prompts, one answer per image, or variations of one prompt. Eight answers take about as long as one. |
 
 All nodes are in the **RulZnodes** category of the node menu.
 
@@ -56,6 +58,7 @@ is not installed for you:
 | RulZ Person Select (SAM3) | A ComfyUI version with built-in SAM 3 support and a SAM 3 or SAM 3.1 checkpoint in `models/checkpoints`. |
 | RulZ Qwen Sparse Sage Attention | SageAttention 2 (`sageattention`), an RTX 40 or RTX 50 GPU, the CUDA toolkit (`nvcc`), `ninja` and a C++ compiler. |
 | RulZ Resize Image Advanced, `nvidia_rtx_vsr` method only | The `nvidia-vfx` library and an NVIDIA RTX GPU. |
+| RulZ Generate Text | A ComfyUI version with the built-in **Generate Text** node and a text encoder that writes text. Its speed needs an NVIDIA GPU. |
 
 > **Coming from the standalone packs?** Remove `ComfyUI-image-load-filename-heic`, `load-image-batch-simple`,
 > `mask-intelligent-crop`, `resize-image-v2-advanced`, `ComfyUI-DeSkin` and `ComfyUI-DisableComfyCompiler` from
@@ -438,6 +441,88 @@ to 10.8 s on an RTX 4060 Ti at `tau` 0.8, with no visible change.
   why. A failed build is not tried again until ComfyUI restarts.
 - Tested on Linux (WSL2) with ComfyUI 0.44.0, PyTorch 2.15 and CUDA 13.4.
 
+## RulZ Generate Text
+
+`RulZGenerateText`: writes text with the language model inside a loaded CLIP, as ComfyUI's **Generate Text**
+does, and writes several answers in one pass.
+
+One decode step is spent reading the model's weights from VRAM, and that costs almost the same for many answers
+as for one. With Qwen3-VL 4B int8 on an RTX 4060 Ti, 200 tokens per answer:
+
+| Answers at once | Tokens per second, all answers together |
+|---|---|
+| 1 | about 45 |
+| 8 | about 320 |
+| 32 | about 1,050 |
+
+Three things make a batch:
+
+- **A list** wired into `prompt`, `image`, `video`, `audio`, `system_prompt` or `seed`: one answer per item. Lists
+  are paired up by position, and a shorter list repeats its last item. The other inputs use their first value.
+- **`image_mode` = `one answer per image`**: an image batch is asked the prompt once per image.
+- **`variations`**: several answers to the same prompt, variation *n* drawn with `seed + n`.
+
+They multiply: 4 prompts with 3 variations are 12 answers. Both outputs are lists with one entry per answer, in
+the order prompt, then image, then variation, so a node after this one runs once per answer.
+
+| Input | Description |
+|---|---|
+| `clip` | A CLIP holding a language model, such as `qwen3vl_4b` from **Load CLIP** with type `krea2`. |
+| `prompt` | What to ask. Wire a list to ask several things at once. |
+| `max_length` | The most tokens to write per answer. A token is about three quarters of a word. Default `512`. |
+| `sampling` | `on` draws each token at random within the limits below. `off` always takes the likeliest token. |
+| `temperature`, `top_k`, `top_p`, `min_p` | The sampling limits, as in Generate Text. Read only with `sampling` on. |
+| `repetition_penalty`, `presence_penalty` | Make tokens an answer already used less likely. Each answer counts its own tokens. `1.0` and `0` turn them off. |
+| `seed` | The same seed, settings and batch write the same text. A list of seeds asks the prompt once per seed. |
+| `variations` | Answers per prompt, 1 to 64. Needs `sampling` on: with it off every variation would be the same text, so one is written. |
+| `batch_size` | The most answers decoded at once, 1 to 64, default `8`. More answers than this are written in several passes. |
+| `image` (optional) | A picture to ask about, for a model that reads images. |
+| `image_mode` (optional) | What an image batch means: `all images in one prompt` (as Generate Text) or `one answer per image`. |
+| `video`, `audio` (optional) | Video frames as an image batch, or sound, for a model that takes them. |
+| `thinking` (optional) | Lets a model that reasons think before it answers. |
+| `use_default_template` (optional) | Wraps the prompt in the model's own chat template and system prompt. Default on. |
+| `mtp` (optional) | Multi-token prediction, for a checkpoint that carries those heads. |
+| `system_prompt` (optional) | Replaces the system prompt in the model's chat template. Read only with `use_default_template` on. |
+
+**Outputs:** `generated_text` and `thinking` (what a reasoning model thought before answering, empty otherwise).
+
+After a run the node shows a status line (answers, tokens, tokens per second and anything worth knowing) and
+the answers themselves.
+
+**How it decodes:**
+
+- The node switches the model onto ComfyUI's fixed-cache, graph-captured decode for the run, as
+  [WAS Node Suite](https://github.com/WASasquatch/was-node-suite-comfyui)'s Fast Generate Text does, and puts
+  the model back afterwards. ComfyUI already uses that decode for Qwen3-VL. For models it leaves on the plain
+  decode the difference is large: Qwen3 8B int8 on an RTX 4060 Ti wrote about 2.4 tokens/s with Generate Text and about
+  20 with this node.
+- Prompts of different lengths share a batch. Text-only prompts are padded and masked; prompts with images
+  share a batch when their images have the same size.
+- Each answer draws its random numbers from its own seed, whichever batch it lands in. A batch still changes
+  the rounding of the model's arithmetic a little, so an answer written in a batch can differ from the same
+  prompt and seed in another batch, usually after the first ten to fifty tokens. A run that writes a single
+  answer writes exactly what Generate Text writes for that seed on the same decode.
+- The key/value cache of a batch takes VRAM for every answer's `max_length`, whether or not the answers get that
+  long: about 150 KB per token and answer for a 4B model. The node cuts the batch to what fits in free VRAM, and
+  halves a batch that still runs out. Keep `max_length` near what you need when you write many answers at once.
+- A model that does not fit in VRAM writes very slowly, because the missing weights are read from RAM again for
+  every token: Qwen3-VL 8B int8 fell from 28 tokens/s to 0.6 when 5 GB of it had no room. Batching helps there
+  too, since every answer in the batch shares that cost.
+
+**Limits:**
+
+- Some models run one answer at a time, and the status line says so: Qwen 3.5 (Qwen Image 2.1 prompt enhancers,
+  with or without a multi-token-prediction head), which writes through its own decoder, and Gemma 4, whose
+  decoder takes inputs that cannot be stacked. Gemma 4 and Gemma 3 are untested.
+- If the CLIP was already loaded for encoding before this node first ran, ComfyUI has laid its weights out in a
+  way the graph decode cannot use (switching it on in place makes the model write garbage, so the node never
+  does that). The node then loads a second copy of the model for writing, which takes that much more RAM
+  while both are in use, and says so in the status line. Qwen3-VL is not affected.
+- Needs an NVIDIA GPU and ComfyUI's dynamic VRAM for the graph decode. Without them, or with
+  `--disable-cuda-graphs`, the node still batches where it can and the status line names the decode that ran.
+- Tested on Linux (WSL2) with ComfyUI 0.45.0 and PyTorch 2.15 on an RTX 4060 Ti, with Qwen3-VL 4B and 8B and
+  Qwen3 8B, all int8.
+
 ## Credits
 
 RulZ Resize Image Advanced is based on the Resize Image v2 node, its pad helpers and its colour parser from
@@ -447,6 +532,10 @@ RulZ DeskinTexture is based on ComfyUI-DeSkin 1.4.0 (MIT).
 
 RulZ Qwen Sparse Sage Attention's kernel in `sparse_sage/csrc` is SageAttention 2
 ([thu-ml/SageAttention](https://github.com/thu-ml/SageAttention)), changed to skip key blocks.
+
+RulZ Generate Text started from the Fast Generate Text node of
+[WAS Node Suite](https://github.com/WASasquatch/was-node-suite-comfyui) by WASasquatch (MIT): the switch onto
+ComfyUI's graph decode and its guards follow that node.
 
 The photos in the screenshots were generated for this README.
 
