@@ -21,6 +21,7 @@
 |---|---|
 | [**RulZ Load Image (HEIC)**](#rulz-load-image-heic) | `LoadImage` replacement that also loads `.heic` / `.heif` and outputs the filename. |
 | [**RulZ Load Image Batch (HEIC)**](#rulz-load-image-batch-heic) | The HEIC loader with a list: drop several photos on it and each queued run uses the next one. |
+| [**RulZ Load Image (HEIC) - Reference**](#rulz-load-image-heic---reference) | Up to 16 image slots on one node, each with its own dropdown, upload button, preview and `IMAGE` output, for loading reference images. |
 | [**RulZ Image Browser**](#rulz-image-browser) | Sidebar tab, not a graph node: browse a folder as thumbnails, select images and send them to RulZ Load Image Batch (HEIC). |
 | [**RulZ Simple Load Image Batch**](#rulz-simple-load-image-batch) | Walks through every image in a folder, one image per queued run, and resumes where it stopped. |
 | [**RulZ Mask Intelligent Crop**](#rulz-mask-intelligent-crop) | Crops an image and/or mask to the mask's bounding box plus padding, with an aspect limit and divisible-by snapping. |
@@ -107,6 +108,34 @@ is not installed for you:
 - Picking a file from the `image` dropdown or pasting an image adds it to the list too. **clear list** empties
   the list.
 - The list is saved with the workflow (in the node's properties), so it survives a reload.
+
+## RulZ Load Image (HEIC) - Reference
+
+`LoadImageReferenceHEIC`: loads several reference images with one node instead of a pile of Load Image nodes.
+Every slot loads the same way as **RulZ Load Image (HEIC)**.
+
+| Input | Description |
+|---|---|
+| `count` | How many slots to use, 1 to 16, default `1`. Only slots 1 to `count` are shown, checked, hashed and loaded. |
+| `image_1` to `image_16` | The file for each slot, picked from the same list as **RulZ Load Image (HEIC)** (PNG, JPEG, WebP, BMP, GIF, TIFF, and HEIC / HEIF when `pillow-heif` is installed). |
+
+**Outputs:** `image_1` to `image_16`, one `IMAGE` per slot. There are no mask or filename outputs. The node only
+has as many outputs as `count`.
+
+- Each slot has a dropdown and its own **Upload image N** button. Below them a grid of numbered thumbnails shows
+  the picture in every visible slot.
+- **Upload image N** takes several files at once. They are uploaded to ComfyUI's `input` folder and fill the
+  slots in natural filename order (`img2` before `img10`), starting at slot N. `count` grows to fit.
+- Drag images onto a thumbnail to fill from that slot on. Dropping on the node anywhere else fills from slot 1.
+  Files beyond slot 16 are ignored and a message says how many. If an upload fails, an error message names the
+  file and the reason.
+- Uploaded files can be picked in the other slots' dropdowns too.
+- Lowering `count` hides the slots above it and removes their outputs, which drops any links on them. The file
+  chosen in a hidden slot is kept, and a hidden slot with a missing file does not stop the run. Raising `count`
+  brings the slots and outputs back, but not the links.
+- A visible slot with a missing file stops the run with an error that names the slot, for example
+  *Image 3: invalid image file: x.png*. The node runs again when the file in any visible slot changes, and not
+  when a hidden slot's does.
 
 ## RulZ Image Browser
 

@@ -5,6 +5,7 @@ import traceback
 # without an API it needs, a missing optional package) disables only its own nodes.
 _MODULES = (
     "load_image_heic",
+    "load_image_reference",
     "load_image_batch",
     "mask_intelligent_crop",
     "resize_image_advanced",
