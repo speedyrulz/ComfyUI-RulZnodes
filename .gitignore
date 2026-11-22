@@ -2,6 +2,7 @@ __pycache__/
 *.pyc
 batch_state.json
 batch_state.json.tmp
+anthropic_api_key.txt
 
 # Local agent instructions (kept out of the repo)
 CLAUDE.md

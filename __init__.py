@@ -15,6 +15,7 @@ _MODULES = (
     "qwen_sparse_attention",
     "person_select",
     "generate_text",
+    "claude_vision",
 )
 
 NODE_CLASS_MAPPINGS = {}

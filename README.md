@@ -32,6 +32,7 @@
 | [**RulZ Person Select (SAM3)**](#rulz-person-select-sam3) | Load an image, click a person on the node, and get a mask of that person and a mask of everyone else. |
 | [**RulZ Qwen Sparse Sage Attention**](#rulz-qwen-sparse-sage-attention) | Block-sparse SageAttention for Qwen Image 2.1: sampling steps take about 23% less time at 4 MP, with SageAttention's quality. |
 | [**RulZ Generate Text**](#rulz-generate-text) | Generate Text that writes several answers in one pass: a list of prompts, one answer per image, or variations of one prompt. Eight answers take about as long as one. |
+| [**RulZ Claude Vision**](#rulz-claude-vision) | Sends an image (or several), a system prompt and a prompt to Claude through the Anthropic API and returns its answer and thinking summary. |
 
 All nodes are in the **RulZnodes** category of the node menu.
 
@@ -60,6 +61,7 @@ is not installed for you:
 | RulZ Qwen Sparse Sage Attention | SageAttention 2 (`sageattention`), an RTX 40 or RTX 50 GPU, the CUDA toolkit (`nvcc`), `ninja` and a C++ compiler. |
 | RulZ Resize Image Advanced, `nvidia_rtx_vsr` method only | The `nvidia-vfx` library and an NVIDIA RTX GPU. |
 | RulZ Generate Text | A ComfyUI version with the built-in **Generate Text** node and a text encoder that writes text. Its speed needs an NVIDIA GPU. |
+| RulZ Claude Vision | The `anthropic` Python package (in `requirements.txt`) and an Anthropic API key. |
 
 > **Coming from the standalone packs?** Remove `ComfyUI-image-load-filename-heic`, `load-image-batch-simple`,
 > `mask-intelligent-crop`, `resize-image-v2-advanced`, `ComfyUI-DeSkin` and `ComfyUI-DisableComfyCompiler` from
@@ -551,6 +553,64 @@ the answers themselves.
   `--disable-cuda-graphs`, the node still batches where it can and the status line names the decode that ran.
 - Tested on Linux (WSL2) with ComfyUI 0.45.0 and PyTorch 2.15 on an RTX 4060 Ti, with Qwen3-VL 4B and 8B and
   Qwen3 8B, all int8.
+
+## RulZ Claude Vision
+
+`RulZClaudeVision`: asks Claude about an image (or several) through the Anthropic API, using the official
+`anthropic` Python package. It sends an optional image or image batch, a system prompt and a prompt, and returns
+Claude's reply and a summary of its thinking. You pick the model and how hard it thinks. This node costs money:
+every run is billed to your Anthropic account.
+
+| Input | Description |
+|---|---|
+| `model` | Which Claude model answers. The list is fetched from your account once per ComfyUI run when a key is set at startup (environment variable or key file), otherwise a built-in list is shown. A workflow saved with a model that is not in the list still runs. Default `claude-opus-5-5`. |
+| `thinking` | `off`, `low`, `medium`, `high`, `xhigh` or `max`. Default `medium`. Sent the way each model accepts it; see below. |
+| `system_prompt` | Standing instructions for Claude. Can stay empty. |
+| `prompt` | What to ask. Wire a list to ask several things, one answer each. |
+| `max_tokens` | The most tokens Claude may write, thinking included. Default `16000`. |
+| `seed` | Not sent to Claude, which has no seed. It only lets you force the node to run again. |
+| `image` (optional) | A picture or an image batch to ask about. Up to 100 images per request. |
+| `image_mode` (optional) | `all images in one request`, or `one answer per image`, which asks the prompt once per image. |
+| `api_key` (optional) | Your API key. See the warning below. |
+
+**Outputs:** `text` and `thinking` (a summary of what Claude thought, empty when thinking is off). Both are lists
+with one entry per request, so a node after this one runs once per answer. The node status line shows the model
+that answered, the effort, the tokens used and any note.
+
+**API key.** The node looks in this order and uses the first it finds:
+
+1. the `api_key` input;
+2. the `ANTHROPIC_API_KEY` environment variable;
+3. the first line of `anthropic_api_key.txt` in the RulZnodes folder (the file is git-ignored);
+4. whatever the Anthropic SDK finds itself: `ANTHROPIC_AUTH_TOKEN`, or a profile from `ant auth login`.
+
+> **Warning:** a key typed into `api_key` is saved in the workflow file and in the metadata of every PNG that
+> ComfyUI saves, so anyone you share those with gets your key. Use the environment variable or the key file instead.
+
+**Thinking by model.** The API rejects some combinations, so the node adjusts the request and says so in the status line:
+
+| Model | `off` | Other levels |
+|---|---|---|
+| Opus 5.5, Fable 5.x, Mythos | Cannot be turned off: runs at `low` | Adaptive thinking at that effort |
+| Sonnet 5.5 | Thinking between tool calls only, at `low` | Adaptive thinking at that effort |
+| Haiku 5.5, Opus 5 | Thinking disabled | Adaptive thinking at that effort |
+| Opus 4.8 and 4.7, Sonnet 5 | Thinking disabled | Adaptive thinking at that effort |
+| Opus 4.6, Sonnet 4.6 | Thinking disabled | Adaptive; `xhigh` is lowered to `high` |
+| Haiku 4.5 and older | No thinking | A token budget instead of an effort: 2048, 8000, 16000, 32000 for `low`, `medium`, `high`, `xhigh` and `max` |
+| Any newer model | As Opus 5.5 | As Opus 5.5 |
+
+The thinking summary is requested with `display: summarized`, otherwise the API returns none. Temperature and
+the other sampling settings are not sent.
+
+**How it works:**
+
+- The request is streamed, so the **Cancel** button of ComfyUI stops the node while Claude is still writing.
+- Images are sent as PNG. An image over 8000 pixels on an edge is scaled down to fit, and one whose PNG is over
+  5 MB is sent as JPEG and, if still too big, shrunk until it fits. Alpha is dropped.
+- For Opus 5.5, Fable 5.x, Opus 5 and Sonnet 5.5 the node asks the API to re-run a refused request on a fallback
+  model. The status line names the model that answered when it was not the one you picked. A request that is still
+  refused raises an error with Claude's reason.
+- An empty prompt with no image is an error. A reply cut off at `max_tokens` is returned with a note.
 
 ## Credits
 
