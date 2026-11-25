@@ -16,6 +16,7 @@ _MODULES = (
     "person_select",
     "generate_text",
     "claude_vision",
+    "load_model_clip_vae",
 )
 
 NODE_CLASS_MAPPINGS = {}
