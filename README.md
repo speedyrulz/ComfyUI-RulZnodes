@@ -33,6 +33,7 @@
 | [**RulZ Qwen Sparse Sage Attention**](#rulz-qwen-sparse-sage-attention) | Block-sparse SageAttention for Qwen Image 2.1: sampling steps take about 23% less time at 4 MP, with SageAttention's quality. |
 | [**RulZ Generate Text**](#rulz-generate-text) | Generate Text that writes several answers in one pass: a list of prompts, one answer per image, or variations of one prompt. Eight answers take about as long as one. |
 | [**RulZ Claude Vision**](#rulz-claude-vision) | Sends an image (or several), a system prompt and a prompt to Claude through the Anthropic API and returns its answer and thinking summary. |
+| [**RulZ OpenRouter Vision**](#rulz-openrouter-vision) | Sends an image (or several), a system prompt and a prompt to any model on OpenRouter and returns its answer and thinking summary. |
 | [**RulZ Load Model, CLIP and VAE**](#rulz-load-model-clip-and-vae) | Load Diffusion Model, Load CLIP and Load VAE in one node, with all of their settings. |
 
 All nodes are in the **RulZnodes** category of the node menu.
@@ -63,6 +64,7 @@ is not installed for you:
 | RulZ Resize Image Advanced, `nvidia_rtx_vsr` method only | The `nvidia-vfx` library and an NVIDIA RTX GPU. |
 | RulZ Generate Text | A ComfyUI version with the built-in **Generate Text** node and a text encoder that writes text. Its speed needs an NVIDIA GPU. |
 | RulZ Claude Vision | The `anthropic` Python package (in `requirements.txt`) and an Anthropic API key. |
+| RulZ OpenRouter Vision | An OpenRouter API key. Nothing to install: it uses `requests`, which ComfyUI already has. |
 
 > **Coming from the standalone packs?** Remove `ComfyUI-image-load-filename-heic`, `load-image-batch-simple`,
 > `mask-intelligent-crop`, `resize-image-v2-advanced`, `ComfyUI-DeSkin` and `ComfyUI-DisableComfyCompiler` from
@@ -612,6 +614,80 @@ the other sampling settings are not sent.
   model. The status line names the model that answered when it was not the one you picked. A request that is still
   refused raises an error with Claude's reason.
 - An empty prompt with no image is an error. A reply cut off at `max_tokens` is returned with a note.
+
+## RulZ OpenRouter Vision
+
+`RulZOpenRouterVision`: asks any model on [OpenRouter](https://openrouter.ai/models) about an image (or several).
+It is the sibling of **RulZ Claude Vision** for the hundreds of models OpenRouter offers: Claude, Gemini, GPT, Grok,
+Qwen, Gemma and more, through one key. It sends an optional image or image batch, a system prompt and a prompt, and
+returns the model's reply and, when the model shows it, a summary of its thinking. This node costs money: every run
+is billed to your OpenRouter account, except runs on free models (ids ending in `:free`).
+
+| Input | Description |
+|---|---|
+| `model` | Which model answers. The list holds the models that take images and answer in text; see below. A workflow saved with a model that is not in the list still runs. Default `~openai/gpt-mini-latest`. |
+| `thinking` | `off`, `low`, `medium`, `high`, `xhigh` or `max`. Default `medium`. Sent the way each model accepts it; see below. |
+| `system_prompt` | Standing instructions for the model. Can stay empty. |
+| `prompt` | What to ask. Wire a list to ask several things, one answer each. |
+| `max_tokens` | The most tokens the model may write, thinking included. Default `16000`. OpenRouter holds back credit for all of it, so lower it on a small balance. |
+| `temperature` | `-1` (the default) sends nothing and the model uses its own setting. Otherwise 0 to 2. |
+| `seed` | Sent to models that take a seed, lowered to 31 bits. It makes their answers repeatable, not guaranteed identical. It also lets you force the node to run again. |
+| `image` (optional) | A picture or an image batch to ask about. Up to 100 images per request. |
+| `image_mode` (optional) | `all images in one request`, or `one answer per image`, which asks the prompt once per image. |
+| `data_policy` (optional) | Which providers OpenRouter may use for your prompt and images; see below. Default `no training on data`. |
+| `api_key` (optional) | Your API key. See the warning below. |
+
+**Outputs:** `text` and `thinking` (what the model showed of its thinking, empty when it shows none). Both are lists
+with one entry per request, so a node after this one runs once per answer. The node status line shows the model that
+answered (and the one you asked for, when they differ), the provider, the thinking level in effect, the tokens used,
+the cost in dollars and any note.
+
+**API key.** The node looks in this order and uses the first it finds:
+
+1. the `api_key` input;
+2. the `OPENROUTER_API_KEY` environment variable;
+3. the first line of `openrouter_api_key.txt` in the RulZnodes folder (the file is git-ignored).
+
+Without a key the node stops with an error before anything is sent. Create a key at
+[openrouter.ai/keys](https://openrouter.ai/keys).
+
+> **Warning:** a key typed into `api_key` is saved in the workflow file and in the metadata of every PNG that
+> ComfyUI saves, so anyone you share those with gets your key. Use the environment variable or the key file instead.
+
+**Thinking.** OpenRouter reports for each model which thinking levels it accepts, and the node sends only those. When
+it has to bend a setting, the status line says so:
+
+- A model with no thinking gets no thinking setting, and a note when you asked for a level above `off`.
+- `off` is sent as such where the model allows it. Where thinking cannot be turned off, the node uses the lowest level
+  the model accepts and says so.
+- A level the model does not accept is replaced by the nearest one it does (the lower one when two are equally near).
+- A router such as `openrouter/auto` chooses the model that answers, and that model decides whether it thinks.
+- A model that is not in the list gets the level as you set it.
+
+**Data policy.** `any provider` sends nothing extra. `no training on data` asks OpenRouter to use only providers that
+do not train on your data, and `zero data retention` only providers that keep nothing. The stricter the setting, the
+fewer providers a model has, and some models then have none: the request fails with a "no provider" error that says
+to try `any provider`.
+
+**How it works:**
+
+- The model list is fetched from openrouter.ai, without a key and without any information about you, when ComfyUI
+  first loads the node list. The node waits at most a few seconds for it and shows a built-in list when it does not
+  arrive, then tries again at most every five minutes. The list is not refreshed during a ComfyUI run once it is in.
+  It leaves out batch-priced `:batch` entries and models that output images, audio or video. It also holds what each
+  model accepts (temperature, seed, thinking levels, the most tokens it writes), and the node leaves out what a model
+  does not accept and says so in the status line. A run still works when the list could not be fetched, only
+  without that knowledge. Sending an image to a model that OpenRouter lists as text-only is an error before anything
+  is sent. The full list is on [openrouter.ai/models](https://openrouter.ai/models).
+- The request is streamed, so the **Cancel** button of ComfyUI stops the node at once, also while it waits for the
+  model to start. Whether the provider then stops generating, and stops billing, depends on the provider.
+- A request is tried again, up to twice, only when OpenRouter answers 408, 429, 502 or 503 before any text arrives.
+  After a lost connection it is not tried again, because the request may already have been billed.
+- Images are sent as PNG. An image over 8000 pixels on an edge is scaled down to fit, and one whose PNG is over
+  5 MB is sent as JPEG and, if still too big, shrunk until it fits. Alpha is dropped.
+- An empty prompt with no image is an error. A reply cut off at `max_tokens` is returned with a note, and when
+  thinking used up all the tokens and no text is left, the note says so. A model that declines the request raises
+  an error with its reason.
 
 ## RulZ Load Model, CLIP and VAE
 
