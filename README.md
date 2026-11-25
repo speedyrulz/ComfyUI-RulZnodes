@@ -11,8 +11,8 @@
   Nodes for ComfyUI: load HEIC photos with their filename, pick images from a sidebar browser or step through a
   folder one image per run, crop to a mask with sensible padding, resize with megapixel and input-size targets,
   remove honeycomb skin texture, turn off the Comfy compiler per workflow, pick a random prompt from a text file,
-  mask a person by clicking them, run Qwen Image 2.1 attention block-sparse, and write text with a language
-  model, several answers in one pass.
+  mask a person by clicking them, run Qwen Image 2.1 attention block-sparse, write text with a language model,
+  several answers in one pass, and load a diffusion model, a text encoder and a VAE with one node.
 </p>
 
 ## Nodes
@@ -33,6 +33,7 @@
 | [**RulZ Qwen Sparse Sage Attention**](#rulz-qwen-sparse-sage-attention) | Block-sparse SageAttention for Qwen Image 2.1: sampling steps take about 23% less time at 4 MP, with SageAttention's quality. |
 | [**RulZ Generate Text**](#rulz-generate-text) | Generate Text that writes several answers in one pass: a list of prompts, one answer per image, or variations of one prompt. Eight answers take about as long as one. |
 | [**RulZ Claude Vision**](#rulz-claude-vision) | Sends an image (or several), a system prompt and a prompt to Claude through the Anthropic API and returns its answer and thinking summary. |
+| [**RulZ Load Model, CLIP and VAE**](#rulz-load-model-clip-and-vae) | Load Diffusion Model, Load CLIP and Load VAE in one node, with all of their settings. |
 
 All nodes are in the **RulZnodes** category of the node menu.
 
@@ -611,6 +612,25 @@ the other sampling settings are not sent.
   model. The status line names the model that answered when it was not the one you picked. A request that is still
   refused raises an error with Claude's reason.
 - An empty prompt with no image is an error. A reply cut off at `max_tokens` is returned with a note.
+
+## RulZ Load Model, CLIP and VAE
+
+`RulZLoadModelClipVae`: **Load Diffusion Model**, **Load CLIP** and **Load VAE** in one node.
+
+| Input | Description |
+|---|---|
+| `unet_name` | The diffusion model. |
+| `weight_dtype` | As on Load Diffusion Model. Default `default`. |
+| `clip_name` | The text encoder. |
+| `type` | The kind of model the text encoder is for, as on Load CLIP. |
+| `device` | Where the text encoder runs, `default` or `cpu`. |
+| `vae_name` | The VAE. |
+
+**Outputs:** `MODEL`, `CLIP` and `VAE`.
+
+The lists are those of the three nodes, so a type that a later ComfyUI adds is here as well. The node hands its
+settings to the three nodes, and ComfyUI caches each part on its own: choosing another VAE does not load the model
+again.
 
 ## Credits
 
