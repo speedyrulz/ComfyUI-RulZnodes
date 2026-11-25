@@ -16,6 +16,7 @@ _MODULES = (
     "person_select",
     "generate_text",
     "claude_vision",
+    "openrouter_vision",
     "load_model_clip_vae",
 )
 
